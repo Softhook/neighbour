@@ -16,7 +16,8 @@ const SCREEN_GAME = 2;
 
 // Game modes
 const MODE_TWO_PLAYER = 0;
-const MODE_VS_AI = 1;
+const MODE_VS_AI_HUMAN_BLACK = 1;
+const MODE_VS_AI_HUMAN_WHITE = 2;
 
 // Hex directions (axial)
 const HEX_DIRECTIONS = [
@@ -108,15 +109,18 @@ function draw() {
     }
     
     // AI processing
-    if (game.gameMode === MODE_VS_AI && game.currentPlayer === PLAYER_WHITE && !game.gameOver && !game.aiThinking) {
-      game.aiThinking = true;
-      setTimeout(() => {
-        const aiMove = getAIMove();
-        if (aiMove) {
-          makeMove(aiMove.q, aiMove.r);
-        }
-        game.aiThinking = false;
-      }, 500); // Slight delay to make AI moves visible
+    if ((game.gameMode === MODE_VS_AI_HUMAN_BLACK && game.currentPlayer === PLAYER_WHITE) || 
+        (game.gameMode === MODE_VS_AI_HUMAN_WHITE && game.currentPlayer === PLAYER_BLACK)) {
+      if (!game.gameOver && !game.aiThinking) {
+        game.aiThinking = true;
+        setTimeout(() => {
+          const aiMove = getAIMove();
+          if (aiMove) {
+            makeMove(aiMove.q, aiMove.r);
+          }
+          game.aiThinking = false;
+        }, 500); // Slight delay to make AI moves visible
+      }
     }
   }
 }
@@ -147,32 +151,41 @@ function drawModeSelectScreen() {
   // Title
   textSize(32);
   fill(0, 0, 15);
-  text("Choose Game Mode", width / 2, height / 2 - 80);
+  text("Choose Game Mode", width / 2, height / 2 - 100);
   
   // Two Player button
   const twoPlayerButton = {
     x: width / 2 - 100,
-    y: height / 2 - 20,
+    y: height / 2 - 60,
     w: 200,
-    h: 40
+    h: 35
   };
   
-  // AI button
-  const aiButton = {
+  // AI as Black button (human plays white)
+  const aiBlackButton = {
     x: width / 2 - 100,
-    y: height / 2 + 40,
+    y: height / 2 - 15,
     w: 200,
-    h: 40
+    h: 35
+  };
+  
+  // AI as White button (human plays black)
+  const aiWhiteButton = {
+    x: width / 2 - 100,
+    y: height / 2 + 30,
+    w: 200,
+    h: 35
   };
   
   // Draw buttons
   drawButton(twoPlayerButton, "2 Player Game");
-  drawButton(aiButton, "vs AI");
+  drawButton(aiBlackButton, "vs AI (You play White)");
+  drawButton(aiWhiteButton, "vs AI (You play Black)");
   
   // Instructions
   textSize(14);
   fill(0, 0, 30);
-  text("Click on a game mode to start", width / 2, height / 2 + 120);
+  text("Click on a game mode to start", width / 2, height / 2 + 100);
 }
 
 function drawButton(button, label) {
@@ -249,17 +262,25 @@ function mousePressed() {
     // Two Player button
     const twoPlayerButton = {
       x: width / 2 - 100,
-      y: height / 2 - 20,
+      y: height / 2 - 60,
       w: 200,
-      h: 40
+      h: 35
     };
     
-    // AI button
-    const aiButton = {
+    // AI as Black button (human plays white)
+    const aiBlackButton = {
       x: width / 2 - 100,
-      y: height / 2 + 40,
+      y: height / 2 - 15,
       w: 200,
-      h: 40
+      h: 35
+    };
+    
+    // AI as White button (human plays black)
+    const aiWhiteButton = {
+      x: width / 2 - 100,
+      y: height / 2 + 30,
+      w: 200,
+      h: 35
     };
     
     // Check button clicks
@@ -270,9 +291,16 @@ function mousePressed() {
       return;
     }
     
-    if (mouseX >= aiButton.x && mouseX <= aiButton.x + aiButton.w &&
-        mouseY >= aiButton.y && mouseY <= aiButton.y + aiButton.h) {
-      game.gameMode = MODE_VS_AI;
+    if (mouseX >= aiBlackButton.x && mouseX <= aiBlackButton.x + aiBlackButton.w &&
+        mouseY >= aiBlackButton.y && mouseY <= aiBlackButton.y + aiBlackButton.h) {
+      game.gameMode = MODE_VS_AI_HUMAN_WHITE;
+      initializeGame();
+      return;
+    }
+    
+    if (mouseX >= aiWhiteButton.x && mouseX <= aiWhiteButton.x + aiWhiteButton.w &&
+        mouseY >= aiWhiteButton.y && mouseY <= aiWhiteButton.y + aiWhiteButton.h) {
+      game.gameMode = MODE_VS_AI_HUMAN_BLACK;
       initializeGame();
       return;
     }
@@ -286,7 +314,8 @@ function mousePressed() {
     }
     
     // Only allow human moves when it's not AI's turn
-    if (game.gameMode === MODE_VS_AI && game.currentPlayer === PLAYER_WHITE) {
+    if ((game.gameMode === MODE_VS_AI_HUMAN_BLACK && game.currentPlayer === PLAYER_WHITE) ||
+        (game.gameMode === MODE_VS_AI_HUMAN_WHITE && game.currentPlayer === PLAYER_BLACK)) {
       return; // AI will make its move automatically
     }
     
@@ -509,8 +538,9 @@ function getPlayerName(player) {
 
 // AI Implementation
 function getAIMove() {
-  const aiPlayer = PLAYER_WHITE;
-  const humanPlayer = PLAYER_BLACK;
+  // Determine which player the AI is controlling
+  const aiPlayer = game.gameMode === MODE_VS_AI_HUMAN_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  const humanPlayer = aiPlayer === PLAYER_WHITE ? PLAYER_BLACK : PLAYER_WHITE;
   
   // Get all valid moves
   const validMoves = getValidMoves(aiPlayer);
