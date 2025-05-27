@@ -36,7 +36,8 @@ let game = {
   gameOver: false,
   winner: null,
   lastPlayerToMove: null,
-  statusMessage: ""
+  statusMessage: "",
+  aiThinking: false
 };
 
 // Display settings
@@ -104,6 +105,18 @@ function draw() {
     
     if (game.gameOver) {
       drawGameOverScreen();
+    }
+    
+    // AI processing
+    if (game.gameMode === MODE_VS_AI && game.currentPlayer === PLAYER_WHITE && !game.gameOver && !game.aiThinking) {
+      game.aiThinking = true;
+      setTimeout(() => {
+        const aiMove = getAIMove();
+        if (aiMove) {
+          makeMove(aiMove.q, aiMove.r);
+        }
+        game.aiThinking = false;
+      }, 500); // Slight delay to make AI moves visible
     }
   }
 }
@@ -270,6 +283,11 @@ function mousePressed() {
     if (game.gameOver) {
       game.screen = SCREEN_MODE_SELECT;
       return;
+    }
+    
+    // Only allow human moves when it's not AI's turn
+    if (game.gameMode === MODE_VS_AI && game.currentPlayer === PLAYER_WHITE) {
+      return; // AI will make its move automatically
     }
     
     const hexCoords = pixelToAxial(mouseX, mouseY);
@@ -487,6 +505,331 @@ function updateStatusMessage() {
 
 function getPlayerName(player) {
   return player === PLAYER_BLACK ? "Black" : "White";
+}
+
+// AI Implementation
+function getAIMove() {
+  const aiPlayer = PLAYER_WHITE;
+  const humanPlayer = PLAYER_BLACK;
+  
+  // Get all valid moves
+  const validMoves = getValidMoves(aiPlayer);
+  if (validMoves.length === 0) return null;
+  
+  // Check for immediate win
+  for (const move of validMoves) {
+    const tempBoard = simulateMove(move.q, move.r, aiPlayer);
+    if (tempBoard.scores[aiPlayer] >= WINNING_SCORE) {
+      return move;
+    }
+  }
+  
+  // Check for moves that prevent human from winning next turn
+  const defensiveMoves = [];
+  for (const move of validMoves) {
+    const tempBoard = simulateMove(move.q, move.r, aiPlayer);
+    const humanValidMoves = getValidMovesForBoard(tempBoard, humanPlayer);
+    
+    let humanCanWin = false;
+    for (const humanMove of humanValidMoves) {
+      const humanTempBoard = simulateMoveOnBoard(tempBoard, humanMove.q, humanMove.r, humanPlayer);
+      if (humanTempBoard.scores[humanPlayer] >= WINNING_SCORE) {
+        humanCanWin = true;
+        break;
+      }
+    }
+    
+    if (!humanCanWin) {
+      defensiveMoves.push(move);
+    }
+  }
+  
+  const movesToEvaluate = defensiveMoves.length > 0 ? defensiveMoves : validMoves;
+  
+  // Evaluate all moves and pick the best one
+  let bestMove = null;
+  let bestScore = -Infinity;
+  
+  for (const move of movesToEvaluate) {
+    const score = evaluateMove(move.q, move.r, aiPlayer);
+    if (score > bestScore) {
+      bestScore = score;
+      bestMove = move;
+    }
+  }
+  
+  return bestMove;
+}
+
+function getValidMoves(player) {
+  const moves = [];
+  for (const hex of game.validHexes) {
+    if (game.board.get(`${hex.q},${hex.r}`).player === EMPTY) {
+      const creature = getCreatureAt(hex.q, hex.r, { q: hex.q, r: hex.r, player });
+      if (creature.size <= MAX_CREATURE_SIZE) {
+        moves.push({ q: hex.q, r: hex.r });
+      }
+    }
+  }
+  return moves;
+}
+
+function getValidMovesForBoard(board, player) {
+  const moves = [];
+  for (const hex of game.validHexes) {
+    if (board.board.get(`${hex.q},${hex.r}`).player === EMPTY) {
+      const creature = getCreatureAtForBoard(board, hex.q, hex.r, { q: hex.q, r: hex.r, player });
+      if (creature.size <= MAX_CREATURE_SIZE) {
+        moves.push({ q: hex.q, r: hex.r });
+      }
+    }
+  }
+  return moves;
+}
+
+function evaluateMove(q, r, player) {
+  const tempBoard = simulateMove(q, r, player);
+  
+  // Base score from pieces eaten
+  let score = (tempBoard.scores[player] - game.scores[player]) * 100;
+  
+  // Bonus for being closer to winning
+  score += tempBoard.scores[player] * 10;
+  
+  // Penalty for opponent being closer to winning
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  score -= tempBoard.scores[opponent] * 8;
+  
+  // Evaluate creature sizes and positions
+  const placedCreature = getCreatureAtForBoard(tempBoard, q, r);
+  
+  // Bonus for creating larger creatures (but not too large)
+  if (placedCreature.size === 2) score += 20;
+  else if (placedCreature.size === 3) score += 35;
+  else if (placedCreature.size === 4) score += 25; // Less bonus for size 4 (vulnerable)
+  
+  // Bonus for central positions
+  const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
+  score += (6 - distanceFromCenter) * 5;
+  
+  // Check if this move creates eating opportunities next turn
+  const nextTurnEating = countPotentialEating(tempBoard, q, r, player);
+  score += nextTurnEating * 30;
+  
+  // Penalty for creating vulnerable size-4 creatures
+  if (placedCreature.size === MAX_CREATURE_SIZE) {
+    const swarmThreat = countSwarmThreat(tempBoard, placedCreature, opponent);
+    score -= swarmThreat * 40;
+  }
+  
+  // Small random factor to avoid predictable play
+  score += (Math.random() - 0.5) * 10;
+  
+  return score;
+}
+
+function simulateMove(q, r, player) {
+  // Create a deep copy of the game state
+  const tempBoard = {
+    board: new Map(),
+    scores: { ...game.scores },
+    piecesInHand: { ...game.piecesInHand }
+  };
+  
+  // Copy board state
+  for (const [key, value] of game.board) {
+    tempBoard.board.set(key, { ...value });
+  }
+  
+  // Simulate the move
+  tempBoard.board.get(`${q},${r}`).player = player;
+  tempBoard.piecesInHand[player]--;
+  
+  // Process eating and swarming
+  const piecesEaten = processEatingAndSwarmingForBoard(tempBoard, q, r, player);
+  tempBoard.scores[player] += piecesEaten;
+  
+  return tempBoard;
+}
+
+function simulateMoveOnBoard(boardState, q, r, player) {
+  // Create a deep copy of the board state
+  const tempBoard = {
+    board: new Map(),
+    scores: { ...boardState.scores },
+    piecesInHand: { ...boardState.piecesInHand }
+  };
+  
+  // Copy board state
+  for (const [key, value] of boardState.board) {
+    tempBoard.board.set(key, { ...value });
+  }
+  
+  // Simulate the move
+  tempBoard.board.get(`${q},${r}`).player = player;
+  tempBoard.piecesInHand[player]--;
+  
+  // Process eating and swarming
+  const piecesEaten = processEatingAndSwarmingForBoard(tempBoard, q, r, player);
+  tempBoard.scores[player] += piecesEaten;
+  
+  return tempBoard;
+}
+
+function processEatingAndSwarmingForBoard(boardState, placedQ, placedR, currentPlayer) {
+  const placedCreature = getCreatureAtForBoard(boardState, placedQ, placedR);
+  const opponent = currentPlayer === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  const creaturesEaten = new Set();
+  
+  // Rule 1: Eating
+  if (placedCreature.size > 1) {
+    for (const piece of placedCreature.pieces) {
+      for (const neighbor of getNeighbors(piece.q, piece.r)) {
+        if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === opponent) {
+          const opponentCreature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
+          if (opponentCreature.size === placedCreature.size - 1) {
+            creaturesEaten.add(getCreatureSignature(opponentCreature));
+          }
+        }
+      }
+    }
+  }
+  
+  // Rule 2: Swarming
+  if (placedCreature.size === 1) {
+    for (const neighbor of getNeighbors(placedQ, placedR)) {
+      if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === opponent) {
+        const targetCreature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
+        if (targetCreature.size === MAX_CREATURE_SIZE) {
+          const swarmCount = countSwarmingCreaturesForBoard(boardState, targetCreature, currentPlayer, placedQ, placedR);
+          if (swarmCount >= 2) {
+            creaturesEaten.add(getCreatureSignature(targetCreature));
+          }
+        }
+      }
+    }
+  }
+  
+  // Remove eaten creatures
+  let totalEaten = 0;
+  for (const signature of creaturesEaten) {
+    const creature = getCreatureFromSignatureForBoard(boardState, signature);
+    if (creature) {
+      for (const piece of creature.pieces) {
+        boardState.board.get(`${piece.q},${piece.r}`).player = EMPTY;
+        totalEaten++;
+      }
+    }
+  }
+  
+  return totalEaten;
+}
+
+function getCreatureAtForBoard(boardState, startQ, startR, hypotheticalPiece = null) {
+  const board = hypotheticalPiece ? 
+    new Map([...boardState.board, [`${hypotheticalPiece.q},${hypotheticalPiece.r}`, hypotheticalPiece]]) :
+    boardState.board;
+  
+  const startKey = `${startQ},${startR}`;
+  if (!board.has(startKey) || board.get(startKey).player === EMPTY) {
+    return { pieces: [], size: 0, player: EMPTY };
+  }
+  
+  const targetPlayer = board.get(startKey).player;
+  const visited = new Set();
+  const queue = [{ q: startQ, r: startR }];
+  const pieces = [];
+  
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const key = `${current.q},${current.r}`;
+    
+    if (visited.has(key)) continue;
+    visited.add(key);
+    pieces.push(current);
+    
+    for (const neighbor of getNeighbors(current.q, current.r)) {
+      if (!visited.has(neighbor.key) && 
+          board.has(neighbor.key) && 
+          board.get(neighbor.key).player === targetPlayer) {
+        queue.push({ q: neighbor.q, r: neighbor.r });
+      }
+    }
+  }
+  
+  return { pieces, size: pieces.length, player: targetPlayer };
+}
+
+function countSwarmingCreaturesForBoard(boardState, targetCreature, friendlyPlayer, excludeQ, excludeR) {
+  const swarmers = new Set();
+  
+  for (const piece of targetCreature.pieces) {
+    for (const neighbor of getNeighbors(piece.q, piece.r)) {
+      if (neighbor.q === excludeQ && neighbor.r === excludeR) continue;
+      
+      if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === friendlyPlayer) {
+        const creature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
+        if (creature.size === 1) {
+          swarmers.add(neighbor.key);
+        }
+      }
+    }
+  }
+  
+  return swarmers.size;
+}
+
+function getCreatureFromSignatureForBoard(boardState, signature) {
+  const [coords, playerStr] = signature.split('_');
+  const [q, r] = coords.split(',').map(Number);
+  const player = parseInt(playerStr);
+  
+  if (boardState.board.has(`${q},${r}`) && boardState.board.get(`${q},${r}`).player === player) {
+    return getCreatureAtForBoard(boardState, q, r);
+  }
+  return null;
+}
+
+function countPotentialEating(boardState, q, r, player) {
+  const creature = getCreatureAtForBoard(boardState, q, r);
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  let eatingOpportunities = 0;
+  
+  for (const piece of creature.pieces) {
+    for (const neighbor of getNeighbors(piece.q, piece.r)) {
+      if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === opponent) {
+        const opponentCreature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
+        if (opponentCreature.size === creature.size - 1) {
+          eatingOpportunities++;
+        }
+      }
+    }
+  }
+  
+  return eatingOpportunities;
+}
+
+function countSwarmThreat(boardState, targetCreature, opponent) {
+  const swarmers = new Set();
+  
+  for (const piece of targetCreature.pieces) {
+    for (const neighbor of getNeighbors(piece.q, piece.r)) {
+      if (boardState.board.has(neighbor.key)) {
+        const cell = boardState.board.get(neighbor.key);
+        if (cell.player === EMPTY) {
+          // Count empty spaces that could become swarmers
+          swarmers.add(neighbor.key);
+        } else if (cell.player === opponent) {
+          const creature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
+          if (creature.size === 1) {
+            swarmers.add(neighbor.key);
+          }
+        }
+      }
+    }
+  }
+  
+  return Math.max(0, swarmers.size - 2); // Threat level based on how many swarmers are possible
 }
 
 // Coordinate conversion functions
