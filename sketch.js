@@ -290,10 +290,30 @@ function drawUI() {
   text(`Black: ${game.scores[PLAYER_BLACK]} eaten / ${game.piecesInHand[PLAYER_BLACK]} left`, width / 4, 30);
   text(`White: ${game.scores[PLAYER_WHITE]} eaten / ${game.piecesInHand[PLAYER_WHITE]} left`, 3 * width / 4, 30);
   
-  // Status message
+  // Status message with color indicator
   textSize(18);
   const playerColor = game.currentPlayer === PLAYER_BLACK ? color(0, 0, 5) : color(0, 0, 98);
+  
+  // Draw color box next to status message
+  const boxSize = 20;
+  const messageWidth = textWidth(game.statusMessage);
+  const boxX = width / 2 - messageWidth / 2 - boxSize - 10;
+  const boxY = height - 40 - boxSize / 2;
+  
+  // Color box background
   fill(playerColor);
+  noStroke();
+  rect(boxX, boxY, boxSize, boxSize, 3);
+  
+  // Color box border
+  stroke(0, 0, 0);
+  strokeWeight(2);
+  noFill();
+  rect(boxX, boxY, boxSize, boxSize, 3);
+  
+  // Status message text
+  fill(0);
+  noStroke();
   text(game.statusMessage, width / 2, height - 40);
 }
 
