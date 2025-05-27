@@ -19,6 +19,11 @@ const MODE_TWO_PLAYER = 0;
 const MODE_VS_AI_HUMAN_BLACK = 1;
 const MODE_VS_AI_HUMAN_WHITE = 2;
 
+// AI difficulty levels
+const AI_DIFFICULTY_EASY = 1;
+const AI_DIFFICULTY_MEDIUM = 2;
+const AI_DIFFICULTY_HARD = 3;
+
 // Hex directions (axial)
 const HEX_DIRECTIONS = [
   { q: 1, r: 0 }, { q: 1, r: -1 }, { q: 0, r: -1 },
@@ -29,6 +34,7 @@ const HEX_DIRECTIONS = [
 let game = {
   screen: SCREEN_INTRO,
   gameMode: MODE_TWO_PLAYER,
+  aiDifficulty: AI_DIFFICULTY_MEDIUM,
   board: new Map(),
   validHexes: [],
   currentPlayer: PLAYER_BLACK,
@@ -37,6 +43,7 @@ let game = {
   gameOver: false,
   winner: null,
   lastPlayerToMove: null,
+  lastPlacedPiece: null,
   statusMessage: "",
   aiThinking: false
 };
@@ -77,6 +84,7 @@ function initializeGame() {
   game.gameOver = false;
   game.winner = null;
   game.lastPlayerToMove = null;
+  game.lastPlacedPiece = null;
   game.screen = SCREEN_GAME;
   
   // Generate hexagonal board
@@ -147,16 +155,16 @@ function drawIntroScreen() {
 
 function drawModeSelectScreen() {
   textAlign(CENTER, CENTER);
-  
+  noStroke();
   // Title
   textSize(32);
   fill(0, 0, 15);
-  text("Choose Game Mode", width / 2, height / 2 - 100);
+  text("Choose Game Mode", width / 2, height / 2 - 120);
   
   // Two Player button
   const twoPlayerButton = {
     x: width / 2 - 100,
-    y: height / 2 - 60,
+    y: height / 2 - 80,
     w: 200,
     h: 35
   };
@@ -164,7 +172,7 @@ function drawModeSelectScreen() {
   // AI as Black button (human plays white)
   const aiBlackButton = {
     x: width / 2 - 100,
-    y: height / 2 - 15,
+    y: height / 2 - 35,
     w: 200,
     h: 35
   };
@@ -172,23 +180,37 @@ function drawModeSelectScreen() {
   // AI as White button (human plays black)
   const aiWhiteButton = {
     x: width / 2 - 100,
-    y: height / 2 + 30,
+    y: height / 2 + 10,
     w: 200,
     h: 35
   };
   
+  // AI Difficulty label
+  textSize(20);
+  fill(0, 0, 15);
+  text("AI Difficulty", width / 2, height / 2 + 65);
+  
+  // AI Difficulty buttons
+  const difficultyButtons = [
+    { x: width / 2 - 90, y: height / 2 + 85, w: 50, h: 30, level: AI_DIFFICULTY_EASY, label: "1" },
+    { x: width / 2 - 25, y: height / 2 + 85, w: 50, h: 30, level: AI_DIFFICULTY_MEDIUM, label: "2" },
+    { x: width / 2 + 40, y: height / 2 + 85, w: 50, h: 30, level: AI_DIFFICULTY_HARD, label: "3" }
+  ];
+   
   // Draw buttons
   drawButton(twoPlayerButton, "2 Player Game");
-  drawButton(aiBlackButton, "vs AI (You play White)");
-  drawButton(aiWhiteButton, "vs AI (You play Black)");
+  drawButton(aiBlackButton, "White vs AI");
+  drawButton(aiWhiteButton, "Black vs AI");
   
-  // Instructions
-  textSize(14);
-  fill(0, 0, 30);
-  text("Click on a game mode to start", width / 2, height / 2 + 100);
+  // Draw difficulty buttons with selection highlight
+  for (const diffBtn of difficultyButtons) {
+    const isSelected = game.aiDifficulty === diffBtn.level;
+    drawDifficultyButton(diffBtn, diffBtn.label, isSelected);
+  }
 }
 
 function drawButton(button, label) {
+
   // Check if mouse is over button
   const isHover = mouseX >= button.x && mouseX <= button.x + button.w &&
                   mouseY >= button.y && mouseY <= button.y + button.h;
@@ -200,9 +222,38 @@ function drawButton(button, label) {
   rect(button.x, button.y, button.w, button.h, 8);
   
   // Button text
+  noStroke();
   fill(0, 0, 15);
   textAlign(CENTER, CENTER);
   textSize(16);
+  text(label, button.x + button.w / 2, button.y + button.h / 2);
+}
+
+function drawDifficultyButton(button, label, isSelected) {
+  // Check if mouse is over button
+  const isHover = mouseX >= button.x && mouseX <= button.x + button.w &&
+                  mouseY >= button.y && mouseY <= button.y + button.h;
+  
+  // Button background - different colors for selected/unselected
+  let buttonColor;
+  if (isSelected) {
+    buttonColor = color(120, 70, 80); // Green for selected
+  } else if (isHover) {
+    buttonColor = color(0, 0, 80);
+  } else {
+    buttonColor = color(0, 0, 70);
+  }
+  
+  fill(buttonColor);
+  stroke(0, 0, 20);
+  strokeWeight(isSelected ? 3 : 2);
+  rect(button.x, button.y, button.w, button.h, 6);
+  
+  // Button text
+  noStroke();
+  fill(0, 0, 15);
+  textAlign(CENTER, CENTER);
+  textSize(14);
   text(label, button.x + button.w / 2, button.y + button.h / 2);
 }
 
@@ -218,6 +269,15 @@ function drawBoard() {
     };
     
     drawHex(pixel.x, pixel.y, hexSize, colors[cell.player]);
+    
+    // Draw red dot on last placed piece
+    if (game.lastPlacedPiece && 
+        game.lastPlacedPiece.q === hex.q && 
+        game.lastPlacedPiece.r === hex.r) {
+      noStroke();
+      fill(0, 100, 100); // Bright red
+      circle(pixel.x, pixel.y, hexSize * 0.3);
+    }
   }
 }
 
@@ -262,7 +322,7 @@ function mousePressed() {
     // Two Player button
     const twoPlayerButton = {
       x: width / 2 - 100,
-      y: height / 2 - 60,
+      y: height / 2 - 80,
       w: 200,
       h: 35
     };
@@ -270,7 +330,7 @@ function mousePressed() {
     // AI as Black button (human plays white)
     const aiBlackButton = {
       x: width / 2 - 100,
-      y: height / 2 - 15,
+      y: height / 2 - 35,
       w: 200,
       h: 35
     };
@@ -278,10 +338,26 @@ function mousePressed() {
     // AI as White button (human plays black)
     const aiWhiteButton = {
       x: width / 2 - 100,
-      y: height / 2 + 30,
+      y: height / 2 + 10,
       w: 200,
       h: 35
     };
+    
+    // AI Difficulty buttons
+    const difficultyButtons = [
+      { x: width / 2 - 90, y: height / 2 + 85, w: 50, h: 30, level: AI_DIFFICULTY_EASY },
+      { x: width / 2 - 25, y: height / 2 + 85, w: 50, h: 30, level: AI_DIFFICULTY_MEDIUM },
+      { x: width / 2 + 40, y: height / 2 + 85, w: 50, h: 30, level: AI_DIFFICULTY_HARD }
+    ];
+    
+    // Check difficulty button clicks
+    for (const diffBtn of difficultyButtons) {
+      if (mouseX >= diffBtn.x && mouseX <= diffBtn.x + diffBtn.w &&
+          mouseY >= diffBtn.y && mouseY <= diffBtn.y + diffBtn.h) {
+        game.aiDifficulty = diffBtn.level;
+        return;
+      }
+    }
     
     // Check button clicks
     if (mouseX >= twoPlayerButton.x && mouseX <= twoPlayerButton.x + twoPlayerButton.w &&
@@ -352,6 +428,7 @@ function makeMove(q, r) {
   cell.player = game.currentPlayer;
   game.piecesInHand[game.currentPlayer]--;
   game.lastPlayerToMove = game.currentPlayer;
+  game.lastPlacedPiece = { q, r };
   
   // Process eating and swarming
   const piecesEaten = processEatingAndSwarming(q, r);
@@ -546,7 +623,15 @@ function getAIMove() {
   const validMoves = getValidMoves(aiPlayer);
   if (validMoves.length === 0) return null;
   
-  // Check for immediate win
+  // Easy AI: Just pick a random valid move occasionally, otherwise use basic evaluation
+  if (game.aiDifficulty === AI_DIFFICULTY_EASY) {
+    if (Math.random() < 0.3) { // 30% chance of random move
+      return validMoves[Math.floor(Math.random() * validMoves.length)];
+    }
+    // Otherwise fall through to basic evaluation
+  }
+  
+  // Check for immediate win (all difficulties)
   for (const move of validMoves) {
     const tempBoard = simulateMove(move.q, move.r, aiPlayer);
     if (tempBoard.scores[aiPlayer] >= WINNING_SCORE) {
@@ -554,27 +639,30 @@ function getAIMove() {
     }
   }
   
-  // Check for moves that prevent human from winning next turn
+  // Medium and Hard AI: Check for defensive moves
   const defensiveMoves = [];
-  for (const move of validMoves) {
-    const tempBoard = simulateMove(move.q, move.r, aiPlayer);
-    const humanValidMoves = getValidMovesForBoard(tempBoard, humanPlayer);
-    
-    let humanCanWin = false;
-    for (const humanMove of humanValidMoves) {
-      const humanTempBoard = simulateMoveOnBoard(tempBoard, humanMove.q, humanMove.r, humanPlayer);
-      if (humanTempBoard.scores[humanPlayer] >= WINNING_SCORE) {
-        humanCanWin = true;
-        break;
+  if (game.aiDifficulty >= AI_DIFFICULTY_MEDIUM) {
+    for (const move of validMoves) {
+      const tempBoard = simulateMove(move.q, move.r, aiPlayer);
+      const humanValidMoves = getValidMovesForBoard(tempBoard, humanPlayer);
+      
+      let humanCanWin = false;
+      for (const humanMove of humanValidMoves) {
+        const humanTempBoard = simulateMoveOnBoard(tempBoard, humanMove.q, humanMove.r, humanPlayer);
+        if (humanTempBoard.scores[humanPlayer] >= WINNING_SCORE) {
+          humanCanWin = true;
+          break;
+        }
       }
-    }
-    
-    if (!humanCanWin) {
-      defensiveMoves.push(move);
+      
+      if (!humanCanWin) {
+        defensiveMoves.push(move);
+      }
     }
   }
   
-  const movesToEvaluate = defensiveMoves.length > 0 ? defensiveMoves : validMoves;
+  const movesToEvaluate = (game.aiDifficulty >= AI_DIFFICULTY_MEDIUM && defensiveMoves.length > 0) ? 
+                          defensiveMoves : validMoves;
   
   // Evaluate all moves and pick the best one
   let bestMove = null;
@@ -623,6 +711,33 @@ function evaluateMove(q, r, player) {
   // Base score from pieces eaten
   let score = (tempBoard.scores[player] - game.scores[player]) * 100;
   
+  // Apply difficulty-based evaluation
+  if (game.aiDifficulty === AI_DIFFICULTY_EASY) {
+    // Easy AI: Only considers immediate eating, adds more randomness
+    score += (Math.random() - 0.5) * 50; // High randomness
+    return score;
+  }
+  
+  if (game.aiDifficulty === AI_DIFFICULTY_MEDIUM) {
+    // Medium AI: Basic strategy with some randomness
+    // Bonus for being closer to winning
+    score += tempBoard.scores[player] * 8;
+    
+    // Penalty for opponent being closer to winning
+    const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+    score -= tempBoard.scores[opponent] * 6;
+    
+    // Basic creature size evaluation
+    const placedCreature = getCreatureAtForBoard(tempBoard, q, r);
+    if (placedCreature.size === 2) score += 15;
+    else if (placedCreature.size === 3) score += 25;
+    
+    // Some randomness
+    score += (Math.random() - 0.5) * 25;
+    return score;
+  }
+  
+  // Hard AI: Full strategic evaluation
   // Bonus for being closer to winning
   score += tempBoard.scores[player] * 10;
   
