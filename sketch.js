@@ -754,24 +754,24 @@ function getMinimaxMove(aiPlayer, humanPlayer, validMoves) {
   
   switch(game.aiDifficulty) {
     case AI_DIFFICULTY_EXPERT:
-      depth = 3;
-      maxThinkingTime = 2000;
-      break;
-    case AI_DIFFICULTY_MASTER:
       depth = 4;
       maxThinkingTime = 3000;
       break;
-    case AI_DIFFICULTY_GRANDMASTER:
+    case AI_DIFFICULTY_MASTER:
       depth = 5;
-      maxThinkingTime = 5000;
+      maxThinkingTime = 4000;
+      break;
+    case AI_DIFFICULTY_GRANDMASTER:
+      depth = 6;
+      maxThinkingTime = 6000;
       break;
     case AI_DIFFICULTY_ULTIMATE:
-      depth = 6;
-      maxThinkingTime = 8000;
+      depth = 7;
+      maxThinkingTime = 10000;
       break;
     default:
-      depth = 3;
-      maxThinkingTime = 2000;
+      depth = 4;
+      maxThinkingTime = 3000;
   }
   
   const startTime = Date.now();
@@ -779,28 +779,55 @@ function getMinimaxMove(aiPlayer, humanPlayer, validMoves) {
   let bestMove = null;
   let bestScore = -Infinity;
   
-  // Sort moves by initial evaluation to improve alpha-beta efficiency
-  const sortedMoves = validMoves.map(move => ({
-    move,
-    score: evaluateMove(move.q, move.r, aiPlayer)
-  })).sort((a, b) => b.score - a.score).map(item => item.move);
-  
-  for (const move of sortedMoves) {
-    // Check time limit
-    if (Date.now() - startTime > maxThinkingTime) {
-      break;
-    }
-    
+  // Enhanced move ordering with multiple evaluation criteria
+  const sortedMoves = validMoves.map(move => {
     const tempBoard = simulateMove(move.q, move.r, aiPlayer);
-    const score = minimax(tempBoard, depth - 1, -Infinity, Infinity, false, aiPlayer, humanPlayer, startTime, maxThinkingTime);
+    const moveScore = evaluateMove(move.q, move.r, aiPlayer);
+    const captureScore = (tempBoard.scores[aiPlayer] - game.scores[aiPlayer]) * 1000;
+    const threatScore = evaluateImmediateThreats(move.q, move.r, aiPlayer) * 100;
+    const positionalScore = evaluateMoveFast(game, move.q, move.r, aiPlayer);
     
-    if (score > bestScore) {
-      bestScore = score;
-      bestMove = move;
+    return {
+      move,
+      score: captureScore + threatScore + moveScore + positionalScore
+    };
+  }).sort((a, b) => b.score - a.score).map(item => item.move);
+  
+  // Iterative deepening for better move ordering
+  let currentDepth = 1;
+  const moveScores = new Map();
+  
+  while (currentDepth <= depth && Date.now() - startTime < maxThinkingTime * 0.8) {
+    let currentBestMove = null;
+    let currentBestScore = -Infinity;
+    
+    // Sort moves based on previous iteration scores
+    const orderedMoves = currentDepth === 1 ? sortedMoves : 
+      [...sortedMoves].sort((a, b) => (moveScores.get(`${b.q},${b.r}`) || -Infinity) - (moveScores.get(`${a.q},${a.r}`) || -Infinity));
+    
+    for (const move of orderedMoves) {
+      if (Date.now() - startTime > maxThinkingTime * 0.9) break;
+      
+      const tempBoard = simulateMove(move.q, move.r, aiPlayer);
+      const score = minimax(tempBoard, currentDepth - 1, -Infinity, Infinity, false, aiPlayer, humanPlayer, startTime, maxThinkingTime);
+      
+      moveScores.set(`${move.q},${move.r}`, score);
+      
+      if (score > currentBestScore) {
+        currentBestScore = score;
+        currentBestMove = move;
+      }
     }
+    
+    if (currentBestMove) {
+      bestMove = currentBestMove;
+      bestScore = currentBestScore;
+    }
+    
+    currentDepth++;
   }
   
-  return bestMove || validMoves[0]; // Fallback to first move if time ran out
+  return bestMove || validMoves[0];
 }
 
 function minimax(boardState, depth, alpha, beta, isMaximizing, aiPlayer, humanPlayer, startTime, maxThinkingTime) {
@@ -864,20 +891,39 @@ function evaluateBoardState(boardState, aiPlayer, humanPlayer) {
   // Terminal evaluation for minimax
   let score = 0;
   
-  // Primary factor: score difference
-  score += (boardState.scores[aiPlayer] - boardState.scores[humanPlayer]) * 100;
+  // Primary factor: score difference with exponential scaling
+  const scoreDiff = boardState.scores[aiPlayer] - boardState.scores[humanPlayer];
+  score += scoreDiff * 150;
   
-  // Check for immediate wins
+  // Exponential bonus for being close to winning
+  if (boardState.scores[aiPlayer] >= 10) {
+    score += Math.pow(boardState.scores[aiPlayer] - 9, 2) * 50;
+  }
+  if (boardState.scores[humanPlayer] >= 10) {
+    score -= Math.pow(boardState.scores[humanPlayer] - 9, 2) * 60;
+  }
+  
+  // Check for immediate wins/losses
   if (boardState.scores[aiPlayer] >= WINNING_SCORE) {
-    return 10000;
+    return 15000;
   }
   if (boardState.scores[humanPlayer] >= WINNING_SCORE) {
-    return -10000;
+    return -15000;
   }
   
-  // Secondary factors (simplified for speed)
-  score += evaluateBoardPosition(boardState, aiPlayer) * 10;
-  score -= evaluateBoardPosition(boardState, humanPlayer) * 8;
+  // Enhanced positional evaluation
+  const aiPositional = evaluateBoardPosition(boardState, aiPlayer);
+  const humanPositional = evaluateBoardPosition(boardState, humanPlayer);
+  score += (aiPositional - humanPositional) * 12;
+  
+  // Mobility evaluation (number of legal moves)
+  const aiMoves = getValidMovesForBoard(boardState, aiPlayer).length;
+  const humanMoves = getValidMovesForBoard(boardState, humanPlayer).length;
+  score += (aiMoves - humanMoves) * 5;
+  
+  // Piece safety evaluation
+  score += evaluatePieceSafety(boardState, aiPlayer) * 8;
+  score -= evaluatePieceSafety(boardState, humanPlayer) * 8;
   
   return score;
 }
@@ -916,18 +962,43 @@ function evaluateMoveFast(boardState, q, r, player) {
   
   let score = 0;
   
-  // Immediate captures
-  score += (tempBoard.scores[player] - boardState.scores[player]) * 100;
+  // Immediate captures (highest priority)
+  const captureValue = (tempBoard.scores[player] - boardState.scores[player]);
+  score += captureValue * 200;
   
-  // Basic position value
-  const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
-  score += (6 - distanceFromCenter) * 2;
+  // Winning moves get massive bonus
+  if (tempBoard.scores[player] >= WINNING_SCORE) {
+    return 5000;
+  }
   
-  // Creature size bonus
+  // Prevent opponent wins
+  if (boardState.scores[opponent] >= 10) {
+    score += 300;
+  }
+  
+  // Creature size evaluation with better balance
   const creature = getCreatureAtForBoard(tempBoard, q, r);
-  if (creature.size === 2) score += 10;
-  else if (creature.size === 3) score += 20;
-  else if (creature.size === 4) score += 15;
+  switch(creature.size) {
+    case 1: score += 2; break;
+    case 2: score += 15; break;
+    case 3: score += 30; break;
+    case 4: 
+      // Size 4 is strong but vulnerable
+      const threats = countAdjacentOpponentPieces(tempBoard, q, r, opponent);
+      score += Math.max(5, 25 - threats * 8);
+      break;
+  }
+  
+  // Central control
+  const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
+  score += (6 - distanceFromCenter) * 3;
+  
+  // Threat creation
+  score += evaluateImmediateThreats(q, r, player, tempBoard) * 10;
+  
+  // Connectivity bonus
+  const connections = countAdjacentFriendlyPieces(tempBoard, q, r, player);
+  score += connections * 8;
   
   return score;
 }
@@ -1050,64 +1121,69 @@ function evaluateAdvancedAI(tempBoard, q, r, player, baseScore) {
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
   const placedCreature = getCreatureAtForBoard(tempBoard, q, r);
   
-  // Advanced strategic evaluation
-  
-  // 1. Territory Control - evaluate area influence
+  // 1. Enhanced Territory Control
   const territoryScore = evaluateTerritoryControl(tempBoard, player);
-  score += territoryScore * 15;
+  const opponentTerritory = evaluateTerritoryControl(tempBoard, opponent);
+  score += (territoryScore - opponentTerritory) * 20;
   
-  // 2. Connectivity - bonus for keeping pieces connected
+  // 2. Superior Connectivity Analysis
   const connectivityScore = evaluateConnectivity(tempBoard, player);
-  score += connectivityScore * 10;
+  score += connectivityScore * 12;
   
-  // 3. Phase-specific strategy
+  // 3. Improved Phase Strategy
   const gamePhase = determineGamePhase(tempBoard);
   score += evaluatePhaseStrategy(tempBoard, q, r, player, gamePhase);
   
-  // 4. Tactical patterns
+  // 4. Enhanced Tactical Patterns
   score += evaluateTacticalPatterns(tempBoard, q, r, player);
   
-  // 5. Enhanced creature size evaluation with position context
+  // 5. Context-Aware Creature Placement
   score += evaluateCreaturePlacement(tempBoard, placedCreature, q, r);
   
-  // 6. Defensive considerations
+  // 6. Advanced Defensive Considerations
   score += evaluateDefensiveValue(tempBoard, q, r, player);
   
-  // 7. Future potential analysis
+  // 7. Strategic Future Planning
   score += evaluateFuturePotential(tempBoard, q, r, player);
   
-  // 8. Minimize randomness for more consistent play at higher levels
+  // 8. Threat Prevention and Creation
+  score += evaluateThreatDynamics(tempBoard, q, r, player);
+  
+  // 9. Minimize randomness for consistent high-level play
   let randomFactor;
   switch(game.aiDifficulty) {
     case AI_DIFFICULTY_EXPERT:
-      randomFactor = 5;
+      randomFactor = 3;
       break;
     case AI_DIFFICULTY_MASTER:
-      randomFactor = 2;
+      randomFactor = 1.5;
       break;
     case AI_DIFFICULTY_GRANDMASTER:
-      randomFactor = 1;
+      randomFactor = 0.8;
       break;
     case AI_DIFFICULTY_ULTIMATE:
-      randomFactor = 0.5;
+      randomFactor = 0.3;
       break;
     default:
-      randomFactor = 5;
+      randomFactor = 3;
   }
   score += (Math.random() - 0.5) * randomFactor;
   
-  // 9. Enhanced evaluation for Grandmaster and Ultimate levels
+  // 10. Grandmaster and Ultimate level enhancements
   if (game.aiDifficulty >= AI_DIFFICULTY_GRANDMASTER) {
-    // Multi-move tactical sequences
+    // Deep tactical analysis
     score += evaluateMultiMoveTactics(tempBoard, q, r, player);
     
-    // Advanced positional understanding
+    // Advanced positional mastery
     score += evaluateAdvancedPositional(tempBoard, q, r, player);
     
     // Endgame precision
     if (determineGamePhase(tempBoard) === 'endgame') {
       score += evaluateEndgamePrecision(tempBoard, q, r, player);
     }
+    
+    // King safety for important pieces
+    score += evaluateKeyPieceSafety(tempBoard, player);
   }
   
   return score;
@@ -1118,28 +1194,57 @@ function evaluateMultiMoveTactics(boardState, q, r, player) {
   let tacticalScore = 0;
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
   
-  // Look ahead 2-3 moves to find tactical sequences
-  // Check for sacrifice combinations that lead to bigger gains
+  // Enhanced lookahead for tactical sequences
   const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+  
+  // 1. Sacrifice combinations that lead to bigger gains
+  const ourScore = tempBoard.scores[player];
   const opponentMoves = getValidMovesForBoard(tempBoard, opponent);
   
-  let maxCounterScore = -Infinity;
-  for (const opMove of opponentMoves.slice(0, 5)) { // Limit to top 5 opponent moves
-    const opTempBoard = simulateMoveOnBoard(tempBoard, opMove.q, opMove.r, opponent);
+  let maxCounterplayValue = -Infinity;
+  
+  // Analyze top opponent responses
+  const sortedOpponentMoves = opponentMoves.map(move => ({
+    move,
+    value: evaluateMoveFast(tempBoard, move.q, move.r, opponent)
+  })).sort((a, b) => b.value - a.value).slice(0, 6);
+  
+  for (const opMove of sortedOpponentMoves) {
+    const opTempBoard = simulateMoveOnBoard(tempBoard, opMove.move.q, opMove.move.r, opponent);
     const ourFollowUps = getValidMovesForBoard(opTempBoard, player);
     
-    for (const followUp of ourFollowUps.slice(0, 3)) { // Top 3 follow-ups
-      const finalBoard = simulateMoveOnBoard(opTempBoard, followUp.q, followUp.r, player);
-      const score = (finalBoard.scores[player] - boardState.scores[player]) * 50;
-      maxCounterScore = Math.max(maxCounterScore, score);
+    // Analyze our best counter-responses
+    const sortedFollowUps = ourFollowUps.map(move => ({
+      move,
+      value: evaluateMoveFast(opTempBoard, move.q, move.r, player)
+    })).sort((a, b) => b.value - a.value).slice(0, 4);
+    
+    for (const followUp of sortedFollowUps) {
+      const finalBoard = simulateMoveOnBoard(opTempBoard, followUp.move.q, followUp.move.r, player);
+      const finalValue = (finalBoard.scores[player] - ourScore) * 80;
+      
+      // Bonus for creating forcing sequences
+      if (finalBoard.scores[player] > opTempBoard.scores[player] + 1) {
+        tacticalScore += finalValue * 0.8;
+      }
+      
+      maxCounterplayValue = Math.max(maxCounterplayValue, finalValue);
     }
   }
   
-  if (maxCounterScore > 0) {
-    tacticalScore += maxCounterScore * 0.7; // Discount future gains
+  // 2. Fork and pin tactics
+  const forkValue = evaluateAdvancedForks(tempBoard, q, r, player);
+  tacticalScore += forkValue * 25;
+  
+  // 3. Breakthrough sequences
+  const breakthroughValue = evaluateBreakthroughSequences(tempBoard, q, r, player);
+  tacticalScore += breakthroughValue * 30;
+  
+  if (maxCounterplayValue > 0) {
+    tacticalScore += maxCounterplayValue * 0.6;
   }
   
-  return tacticalScore;
+  return Math.min(tacticalScore, 200); // Cap to prevent evaluation explosion
 }
 
 function evaluateAdvancedPositional(boardState, q, r, player) {
@@ -2049,6 +2154,212 @@ function countEnemyDensity(boardState, q, r, opponent) {
   }
   
   return density;
+}
+
+// Missing Helper Functions for Enhanced AI
+
+function evaluateImmediateThreats(q, r, player, boardState = null) {
+  if (!boardState) boardState = game;
+  
+  let threatScore = 0;
+  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+  const creature = getCreatureAtForBoard(tempBoard, q, r);
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  
+  if (creature.size > 1) {
+    for (const piece of creature.pieces) {
+      for (const neighbor of getNeighbors(piece.q, piece.r)) {
+        if (tempBoard.board.has(neighbor.key) && 
+            tempBoard.board.get(neighbor.key).player === opponent) {
+          const enemyCreature = getCreatureAtForBoard(tempBoard, neighbor.q, neighbor.r);
+          if (enemyCreature.size === creature.size - 1) {
+            threatScore += enemyCreature.size; // More points for larger threats
+          }
+        }
+      }
+    }
+  }
+  
+  return threatScore;
+}
+
+function countAdjacentOpponentPieces(boardState, q, r, opponent) {
+  let count = 0;
+  for (const neighbor of getNeighbors(q, r)) {
+    if (boardState.board.has(neighbor.key) && 
+        boardState.board.get(neighbor.key).player === opponent) {
+      count++;
+    }
+  }
+  return count;
+}
+
+function countAdjacentFriendlyPieces(boardState, q, r, player) {
+  let count = 0;
+  for (const neighbor of getNeighbors(q, r)) {
+    if (boardState.board.has(neighbor.key) && 
+        boardState.board.get(neighbor.key).player === player) {
+      count++;
+    }
+  }
+  return count;
+}
+
+function evaluatePieceSafety(boardState, player) {
+  let safetyScore = 0;
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  
+  for (const [key, cell] of boardState.board) {
+    if (cell.player === player) {
+      const [q, r] = key.split(',').map(Number);
+      const creature = getCreatureAtForBoard(boardState, q, r);
+      
+      if (creature.size >= 3) {
+        // Check vulnerability to eating
+        const threats = countAdjacentOpponentPieces(boardState, q, r, opponent);
+        safetyScore += Math.max(0, 10 - threats * 2);
+        
+        // Check vulnerability to swarming for size-4 creatures
+        if (creature.size === 4) {
+          const swarmThreat = countSwarmThreat(boardState, creature, opponent);
+          safetyScore -= swarmThreat * 5;
+        }
+      }
+    }
+  }
+  
+  return safetyScore;
+}
+
+function evaluateThreatDynamics(boardState, q, r, player) {
+  let dynamicsScore = 0;
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  
+  // Immediate threats created
+  const immediateThreats = evaluateImmediateThreats(q, r, player, boardState);
+  dynamicsScore += immediateThreats * 15;
+  
+  // Threats blocked
+  const blockedThreats = countBlockedThreats(boardState, q, r, player, opponent);
+  dynamicsScore += blockedThreats * 20;
+  
+  // Future threat potential
+  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+  const nextTurnThreats = countPotentialEating(tempBoard, q, r, player);
+  dynamicsScore += nextTurnThreats * 8;
+  
+  return dynamicsScore;
+}
+
+function evaluateKeyPieceSafety(boardState, player) {
+  let keyPieceSafety = 0;
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  
+  // Find and evaluate safety of largest creatures (key pieces)
+  const creaturesBySize = new Map();
+  
+  for (const [key, cell] of boardState.board) {
+    if (cell.player === player) {
+      const [q, r] = key.split(',').map(Number);
+      const creature = getCreatureAtForBoard(boardState, q, r);
+      
+      if (creature.size >= 3) {
+        if (!creaturesBySize.has(creature.size)) {
+          creaturesBySize.set(creature.size, []);
+        }
+        creaturesBySize.get(creature.size).push(creature);
+      }
+    }
+  }
+  
+  // Evaluate safety of each key piece
+  for (const [size, creatures] of creaturesBySize) {
+    for (const creature of creatures) {
+      const threats = countSurroundingEnemies(boardState, creature);
+      const safety = Math.max(0, size * 5 - threats * 3);
+      keyPieceSafety += safety;
+    }
+  }
+  
+  return keyPieceSafety;
+}
+
+function evaluateAdvancedForks(boardState, q, r, player) {
+  let forkValue = 0;
+  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+  const creature = getCreatureAtForBoard(tempBoard, q, r);
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  
+  if (creature.size > 1) {
+    const threatenedCreatures = new Map(); // creature signature -> threat count
+    
+    for (const piece of creature.pieces) {
+      for (const neighbor of getNeighbors(piece.q, piece.r)) {
+        if (tempBoard.board.has(neighbor.key) && 
+            tempBoard.board.get(neighbor.key).player === opponent) {
+          const enemyCreature = getCreatureAtForBoard(tempBoard, neighbor.q, neighbor.r);
+          if (enemyCreature.size === creature.size - 1) {
+            const sig = getCreatureSignature(enemyCreature);
+            threatenedCreatures.set(sig, (threatenedCreatures.get(sig) || 0) + 1);
+          }
+        }
+      }
+    }
+    
+    // Advanced fork evaluation - multiple threats with different values
+    if (threatenedCreatures.size >= 2) {
+      let totalThreatValue = 0;
+      for (const [sig, threatCount] of threatenedCreatures) {
+        // Parse creature size from signature area for scoring
+        totalThreatValue += threatCount * 10;
+      }
+      forkValue = totalThreatValue * threatenedCreatures.size;
+    }
+  }
+  
+  return forkValue;
+}
+
+function evaluateBreakthroughSequences(boardState, q, r, player) {
+  let breakthroughValue = 0;
+  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  
+  // Look for sequences that penetrate deeply into enemy territory
+  const enemyDensity = countEnemyDensity(tempBoard, q, r, opponent);
+  
+  if (enemyDensity >= 2) {
+    // Check if this creates a wedge in enemy formation
+    const friendlySupport = countAdjacentFriendlyPieces(tempBoard, q, r, player);
+    const enemyResistance = countAdjacentOpponentPieces(tempBoard, q, r, opponent);
+    
+    if (friendlySupport >= 2 && enemyResistance >= 2) {
+      breakthroughValue += 25; // Supported breakthrough
+    }
+    
+    // Check for follow-up opportunities
+    const validMoves = getValidMovesForBoard(tempBoard, player);
+    let followUpThreats = 0;
+    
+    for (const move of validMoves.slice(0, 5)) { // Check top 5 moves
+      const distance = Math.abs(q - move.q) + Math.abs(r - move.r) + Math.abs(-q - r + move.q + move.r);
+      if (distance <= 2) { // Within breakthrough range
+        const followUpBoard = simulateMoveOnBoard(tempBoard, move.q, move.r, player);
+        const threats = evaluateImmediateThreats(move.q, move.r, player, followUpBoard);
+        followUpThreats += threats;
+      }
+    }
+    
+    breakthroughValue += Math.min(followUpThreats * 3, 30); // Cap follow-up bonus
+  }
+  
+  return breakthroughValue;
+}
+
+function isNearEdge(q, r) {
+  // Check if position is within 1 hex of the board edge
+  const maxCoord = 2; // Based on the hexagonal board size
+  return Math.abs(q) >= maxCoord || Math.abs(r) >= maxCoord || Math.abs(-q - r) >= maxCoord;
 }
 
 // Coordinate conversion functions
