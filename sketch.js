@@ -59,6 +59,8 @@ let boardCenter = { x: 0, y: 0 };
 function setup() {
   createCanvas(windowWidth, windowHeight);
   colorMode(HSB, 360, 100, 100, 100);
+  font = loadFont('D-DIN.otf');
+  fontBold = loadFont('D-DIN-Bold.otf');
   calculateHexSize();
   // Don't initialize game board yet - start with intro screen
 }
@@ -153,18 +155,21 @@ function drawIntroScreen() {
   // Game title
   textSize(48);
   fill(0, 0, 15);
-  text("EAT YOUR", width / 2, height / 2 - 40);
-  text("NEIGHBOUR", width / 2, height / 2 + 10);
+  textFont(fontBold);
+  text("EAT YOUR", width / 2, height / 2 - 150);
+  text("NEIGHBOUR", width / 2, height / 2 -100);
   
+  textFont(font);
   // Creator credit
   textSize(18);
   fill(0, 0, 40);
-  text("game by Nick Bentley, javascript Christian Nold", width / 2, height / 2 + 60);
+  text("game by Nick Bentley", width / 2, height / 2 -50);
+  text("javascript Christian Nold", width / 2, height / 2-20);
   
   // Instructions
   textSize(16);
-  fill(0, 0, 30);
-  text("Click to continue", width / 2, height / 2 + 120);
+  fill(0, 100, 100);
+  text("Click to continue", width / 2, height / 2 + 60);
 }
 
 function drawModeSelectScreen() {
@@ -255,7 +260,7 @@ function drawDifficultyButton(button, label, isSelected) {
   // Button background - different colors for selected/unselected
   let buttonColor;
   if (isSelected) {
-    buttonColor = color(120, 70, 80); // Green for selected
+    buttonColor = color(0, 100, 100); // Red for selected
   } else if (isHover) {
     buttonColor = color(0, 0, 80);
   } else {
@@ -302,14 +307,15 @@ function drawBoard() {
 function drawUI() {
   textAlign(CENTER, CENTER);
   fill(0, 0, 10);
-  
+  noStroke();
   // Score display
-  textSize(16);
-  text(`Black: ${game.scores[PLAYER_BLACK]} eaten / ${game.piecesInHand[PLAYER_BLACK]} left`, width / 4, 30);
-  text(`White: ${game.scores[PLAYER_WHITE]} eaten / ${game.piecesInHand[PLAYER_WHITE]} left`, 3 * width / 4, 30);
+  textSize(22);
+  textFont(fontBold);
+  text(`Black: ${game.scores[PLAYER_BLACK]} eaten`, width / 4, 30);
+  text(`White: ${game.scores[PLAYER_WHITE]} eaten`, 3 * width / 4, 30);
   
   // Status message with color indicator
-  textSize(18);
+  textSize(20);
   const playerColor = game.currentPlayer === PLAYER_BLACK ? color(0, 0, 5) : color(0, 0, 98);
   
   // Draw color box next to status message
