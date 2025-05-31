@@ -27,6 +27,9 @@ const AI_DIFFICULTY_EXPERT = 4;
 const AI_DIFFICULTY_MASTER = 5;
 const AI_DIFFICULTY_GRANDMASTER = 6;
 const AI_DIFFICULTY_ULTIMATE = 7;
+const AI_DIFFICULTY_SUPERHUMAN = 8;
+const AI_DIFFICULTY_GODLIKE = 9;
+const AI_DIFFICULTY_OMNISCIENT = 10;
 
 // Hex directions (axial)
 const HEX_DIRECTIONS = [
@@ -169,6 +172,9 @@ function draw() {
         const thinkingDelay = game.aiDifficulty === AI_DIFFICULTY_MASTER ? 1000 : 
                             game.aiDifficulty === AI_DIFFICULTY_GRANDMASTER ? 1500 :
                             game.aiDifficulty === AI_DIFFICULTY_ULTIMATE ? 2000 :
+                            game.aiDifficulty === AI_DIFFICULTY_SUPERHUMAN ? 2500 :
+                            game.aiDifficulty === AI_DIFFICULTY_GODLIKE ? 3000 :
+                            game.aiDifficulty === AI_DIFFICULTY_OMNISCIENT ? 3500 :
                             game.aiDifficulty === AI_DIFFICULTY_EXPERT ? 800 : baseDelay;
         
         setTimeout(() => {
@@ -252,7 +258,10 @@ function drawModeSelectScreen() {
     { x: width / 2 + 35, y: height / 2 + 85, w: 35, h: 30, level: AI_DIFFICULTY_EXPERT, label: "4" },
     { x: width / 2 + 80, y: height / 2 + 85, w: 35, h: 30, level: AI_DIFFICULTY_MASTER, label: "5" },
     { x: width / 2 - 100, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_GRANDMASTER, label: "6" },
-    { x: width / 2 - 55, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_ULTIMATE, label: "7" }
+    { x: width / 2 - 55, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_ULTIMATE, label: "7" },
+    { x: width / 2 - 10, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_SUPERHUMAN, label: "8" },
+    { x: width / 2 + 35, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_GODLIKE, label: "9" },
+    { x: width / 2 + 80, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_OMNISCIENT, label: "10" }
   ];
    
   // Draw buttons
@@ -265,6 +274,13 @@ function drawModeSelectScreen() {
     const isSelected = game.aiDifficulty === diffBtn.level;
     drawDifficultyButton(diffBtn, diffBtn.label, isSelected);
   }
+  
+  // Draw currently selected AI thinking time in center
+  const selectedMoveTime = getAIMaxMoveTime(game.aiDifficulty);
+  textAlign(CENTER, CENTER);
+  textSize(16);
+  fill(0, 100, 100); // Red color to highlight current selection
+  text(`Max AI Thinking: ${selectedMoveTime}`, width / 2, height / 2 + 175);
 }
 
 function drawButton(button, label) {
@@ -431,7 +447,10 @@ function mousePressed() {
       { x: width / 2 + 35, y: height / 2 + 85, w: 35, h: 30, level: AI_DIFFICULTY_EXPERT },
       { x: width / 2 + 80, y: height / 2 + 85, w: 35, h: 30, level: AI_DIFFICULTY_MASTER },
       { x: width / 2 - 100, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_GRANDMASTER },
-      { x: width / 2 - 55, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_ULTIMATE }
+      { x: width / 2 - 55, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_ULTIMATE },
+      { x: width / 2 - 10, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_SUPERHUMAN },
+      { x: width / 2 + 35, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_GODLIKE },
+      { x: width / 2 + 80, y: height / 2 + 125, w: 35, h: 30, level: AI_DIFFICULTY_OMNISCIENT }
     ];
     
     // Check difficulty button clicks
@@ -992,9 +1011,9 @@ function getBoardHash(boardState) {
 }
 
 function initializeOptimizationCaches() {
-  // Initialize killer moves array for each depth
+  // Initialize killer moves array for each depth (increased to support depth 11)
   killerMoves = [];
-  for (let i = 0; i <= 8; i++) {
+  for (let i = 0; i <= 12; i++) {
     killerMoves[i] = { move1: null, move2: null };
   }
   
@@ -1152,7 +1171,26 @@ function getDifficultyName(difficulty) {
     case AI_DIFFICULTY_MASTER: return "Master";
     case AI_DIFFICULTY_GRANDMASTER: return "Grandmaster";
     case AI_DIFFICULTY_ULTIMATE: return "Ultimate";
+    case AI_DIFFICULTY_SUPERHUMAN: return "Superhuman";
+    case AI_DIFFICULTY_GODLIKE: return "Godlike";
+    case AI_DIFFICULTY_OMNISCIENT: return "Omniscient";
     default: return "Unknown";
+  }
+}
+
+function getAIMaxMoveTime(difficulty) {
+  switch(difficulty) {
+    case AI_DIFFICULTY_EASY: return "~1s";
+    case AI_DIFFICULTY_MEDIUM: return "~1s";
+    case AI_DIFFICULTY_HARD: return "~1s";
+    case AI_DIFFICULTY_EXPERT: return "~3s";
+    case AI_DIFFICULTY_MASTER: return "~4s";
+    case AI_DIFFICULTY_GRANDMASTER: return "~6s";
+    case AI_DIFFICULTY_ULTIMATE: return "~10s";
+    case AI_DIFFICULTY_SUPERHUMAN: return "~15s";
+    case AI_DIFFICULTY_GODLIKE: return "~20s";
+    case AI_DIFFICULTY_OMNISCIENT: return "~30s";
+    default: return "~1s";
   }
 }
 
@@ -1253,6 +1291,18 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
     case AI_DIFFICULTY_ULTIMATE:
       depth = 8; // Increased from 7
       maxThinkingTime = 10000;
+      break;
+    case AI_DIFFICULTY_SUPERHUMAN:
+      depth = 9; // Deep search with extended time
+      maxThinkingTime = 15000;
+      break;
+    case AI_DIFFICULTY_GODLIKE:
+      depth = 10; // Very deep search
+      maxThinkingTime = 20000;
+      break;
+    case AI_DIFFICULTY_OMNISCIENT:
+      depth = 11; // Maximum practical depth
+      maxThinkingTime = 30000;
       break;
     default:
       depth = 5;
@@ -1610,6 +1660,9 @@ function evaluateAdvancedAIOriginal(tempBoard, q, r, player, baseScore) {
     case AI_DIFFICULTY_MASTER: randomFactor = 1.5; break;
     case AI_DIFFICULTY_GRANDMASTER: randomFactor = 0.8; break;
     case AI_DIFFICULTY_ULTIMATE: randomFactor = 0.3; break;
+    case AI_DIFFICULTY_SUPERHUMAN: randomFactor = 0.1; break;
+    case AI_DIFFICULTY_GODLIKE: randomFactor = 0.05; break;
+    case AI_DIFFICULTY_OMNISCIENT: randomFactor = 0.01; break;
     default: randomFactor = 3;
   }
   score += (Math.random() - 0.5) * randomFactor;
