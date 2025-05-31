@@ -52,6 +52,38 @@ let game = {
   aiThinking: false
 };
 
+// AI Optimization Infrastructure
+let transpositionTable = new Map();
+let evaluationCache = new Map();
+let creatureCache = new Map();
+let historyHeuristic = {
+  [PLAYER_BLACK]: new Map(),
+  [PLAYER_WHITE]: new Map()
+};
+let killerMoves = [];
+let symmetryMap = new Map();
+
+// Cache management
+const MAX_CACHE_SIZE = 1000000;
+const CACHE_CLEANUP_THRESHOLD = 0.8;
+
+// Performance tracking
+let performanceStats = {
+  cacheHits: 0,
+  cacheMisses: 0,
+  evaluationCalls: 0,
+  transpositionHits: 0,
+  killerMoveHits: 0,
+  searchDepth: 0,
+  moveTime: 0,
+  nodesEvaluated: 0
+};
+
+// Transposition table entry flags
+const TT_EXACT = 0;
+const TT_LOWERBOUND = 1;
+const TT_UPPERBOUND = 2;
+
 // Display settings
 let hexSize = 25;
 let boardCenter = { x: 0, y: 0 };
@@ -103,6 +135,9 @@ function initializeGame() {
       game.validHexes.push({ q, r });
     }
   }
+  
+  // Initialize AI optimization caches
+  initializeOptimizationCaches();
   
   updateStatusMessage();
 }
@@ -339,6 +374,25 @@ function drawUI() {
   fill(0);
   noStroke();
   text(game.statusMessage, width / 2, height - 40);
+  
+  // Show optimization status for Expert+ difficulties in AI vs Human games
+  if ((game.gameMode === MODE_VS_AI_HUMAN_BLACK || game.gameMode === MODE_VS_AI_HUMAN_WHITE) && 
+      game.aiDifficulty >= AI_DIFFICULTY_EXPERT) {
+    textSize(14);
+    fill(40, 80, 70); // Green color
+    const optimizationText = `Optimized AI (Depth ${game.aiDifficulty === AI_DIFFICULTY_EXPERT ? 5 : 
+                                                      game.aiDifficulty === AI_DIFFICULTY_MASTER ? 6 :
+                                                      game.aiDifficulty === AI_DIFFICULTY_GRANDMASTER ? 7 : 8})`;
+    text(optimizationText, width / 2, height - 15);
+    
+    // Show cache sizes if performance stats are available
+    if (transpositionTable.size > 0 || evaluationCache.size > 0) {
+      textSize(12);
+      fill(0, 0, 50);
+      text(`TT: ${transpositionTable.size} | EC: ${evaluationCache.size} | CC: ${creatureCache.size}`, 
+           width / 2, height - 1);
+    }
+  }
 }
 
 function drawGameOverScreen() {
@@ -563,8 +617,10 @@ function getCreatureAt(startQ, startR, hypotheticalPiece = null) {
   const visited = new Set();
   const queue = [{ q: startQ, r: startR }];
   const pieces = [];
+  let iterations = 0;
+  const maxIterations = 1000; // Safety limit
   
-  while (queue.length > 0) {
+  while (queue.length > 0 && iterations < maxIterations) {
     const current = queue.shift();
     const key = `${current.q},${current.r}`;
     
@@ -579,6 +635,7 @@ function getCreatureAt(startQ, startR, hypotheticalPiece = null) {
         queue.push({ q: neighbor.q, r: neighbor.r });
       }
     }
+    iterations++;
   }
   
   return { pieces, size: pieces.length, player: targetPlayer };
@@ -613,6 +670,441 @@ function countSwarmingCreatures(targetCreature, friendlyPlayer, excludeQ, exclud
 
 function getCreatureSignature(creature) {
   return `${creature.pieces[0].q},${creature.pieces[0].r}_${creature.player}`;
+}
+
+// Core AI Support Functions (from try.js optimization)
+
+function getValidMoves(player) {
+  const moves = [];
+  for (const hex of game.validHexes) {
+    if (game.board.get(`${hex.q},${hex.r}`).player === EMPTY) {
+      const creature = getCreatureAt(hex.q, hex.r, { q: hex.q, r: hex.r, player });
+      if (creature.size <= MAX_CREATURE_SIZE) {
+        moves.push({ q: hex.q, r: hex.r });
+      }
+    }
+  }
+  return moves;
+}
+
+function getValidMovesForBoard(boardState, player) {
+  const moves = [];
+  for (const hex of game.validHexes) {
+    if (boardState.board.get(`${hex.q},${hex.r}`).player === EMPTY) {
+      const creature = getCreatureAtForBoardOriginal(boardState, hex.q, hex.r, { q: hex.q, r: hex.r, player });
+      if (creature.size <= MAX_CREATURE_SIZE) {
+        moves.push({ q: hex.q, r: hex.r });
+      }
+    }
+  }
+  return moves;
+}
+
+function simulateMove(q, r, player) {
+  const tempBoard = {
+    board: new Map(),
+    scores: { ...game.scores },
+    piecesInHand: { ...game.piecesInHand }
+  };
+  
+  for (const [key, value] of game.board) {
+    tempBoard.board.set(key, { ...value });
+  }
+  
+  tempBoard.board.get(`${q},${r}`).player = player;
+  tempBoard.piecesInHand[player]--;
+  
+  const piecesEaten = processEatingAndSwarmingForBoard(tempBoard, q, r, player);
+  tempBoard.scores[player] += piecesEaten;
+  
+  return tempBoard;
+}
+
+function simulateMoveOnBoard(boardState, q, r, player) {
+  const tempBoard = {
+    board: new Map(),
+    scores: { ...boardState.scores },
+    piecesInHand: { ...boardState.piecesInHand }
+  };
+  
+  for (const [key, value] of boardState.board) {
+    tempBoard.board.set(key, { ...value });
+  }
+  
+  tempBoard.board.get(`${q},${r}`).player = player;
+  tempBoard.piecesInHand[player]--;
+  
+  const piecesEaten = processEatingAndSwarmingForBoard(tempBoard, q, r, player);
+  tempBoard.scores[player] += piecesEaten;
+  
+  return tempBoard;
+}
+
+function evaluateMove(q, r, player) {
+  const tempBoard = simulateMove(q, r, player);
+  let score = (tempBoard.scores[player] - game.scores[player]) * 100;
+  
+  if (game.aiDifficulty === AI_DIFFICULTY_EASY) {
+    score += (Math.random() - 0.5) * 50;
+    return score;
+  }
+  
+  if (game.aiDifficulty === AI_DIFFICULTY_MEDIUM) {
+    const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+    score += tempBoard.scores[player] * 8;
+    score -= tempBoard.scores[opponent] * 6;
+    
+    const placedCreature = getCreatureAtForBoardOriginal(tempBoard, q, r);
+    if (placedCreature.size === 2) score += 15;
+    else if (placedCreature.size === 3) score += 25;
+    
+    score += (Math.random() - 0.5) * 25;
+    return score;
+  }
+  
+  if (game.aiDifficulty === AI_DIFFICULTY_HARD) {
+    return evaluateHardAI(tempBoard, q, r, player, score);
+  }
+  
+  if (game.aiDifficulty >= AI_DIFFICULTY_EXPERT) {
+    return evaluateAdvancedAIOriginal(tempBoard, q, r, player, score);
+  }
+  
+  return evaluateHardAI(tempBoard, q, r, player, score);
+}
+
+function evaluateMoveFast(boardState, q, r, player) {
+  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  
+  let score = 0;
+  const captureValue = (tempBoard.scores[player] - boardState.scores[player]);
+  score += captureValue * 200;
+  
+  if (tempBoard.scores[player] >= WINNING_SCORE) {
+    return 5000;
+  }
+  
+  if (boardState.scores[opponent] >= 10) {
+    score += 300;
+  }
+  
+  const creature = getCreatureAtForBoardOriginal(tempBoard, q, r);
+  switch(creature.size) {
+    case 1: score += 2; break;
+    case 2: score += 15; break;
+    case 3: score += 30; break;
+    case 4: 
+      const threats = countAdjacentOpponentPieces(tempBoard, q, r, opponent);
+      score += Math.max(5, 25 - threats * 8);
+      break;
+  }
+  
+  const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
+  score += (6 - distanceFromCenter) * 3;
+  
+  score += evaluateImmediateThreats(q, r, player, tempBoard) * 10;
+  
+  const connections = countAdjacentFriendlyPieces(tempBoard, q, r, player);
+  score += connections * 8;
+  
+  return score;
+}
+
+function evaluateImmediateThreats(q, r, player, boardState = game) {
+  let threatScore = 0;
+  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+  const creature = getCreatureAtForBoardOriginal(tempBoard, q, r);
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+
+  for (const dir of HEX_DIRECTIONS) {
+    const nq = q + dir.q;
+    const nr = r + dir.r;
+    const nKey = `${nq},${nr}`;
+    
+    if (tempBoard.board.has(nKey) && tempBoard.board.get(nKey).player === opponent) {
+      const sizeDiff = Math.abs(creature.size - 1);
+      if (sizeDiff === 1) threatScore += 15;
+    }
+  }
+
+  return threatScore;
+}
+
+// Support functions for board simulation
+function processEatingAndSwarmingForBoard(boardState, placedQ, placedR, currentPlayer) {
+  const placedCreature = getCreatureAtForBoardOriginal(boardState, placedQ, placedR);
+  const opponent = currentPlayer === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  const creaturesEaten = new Set();
+  
+  if (placedCreature.size > 1) {
+    for (const piece of placedCreature.pieces) {
+      for (const neighbor of getNeighbors(piece.q, piece.r)) {
+        if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === opponent) {
+          const opponentCreature = getCreatureAtForBoardOriginal(boardState, neighbor.q, neighbor.r);
+          if (opponentCreature.size === placedCreature.size - 1) {
+            creaturesEaten.add(getCreatureSignature(opponentCreature));
+          }
+        }
+      }
+    }
+  }
+  
+  if (placedCreature.size === 1) {
+    for (const neighbor of getNeighbors(placedQ, placedR)) {
+      if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === opponent) {
+        const targetCreature = getCreatureAtForBoardOriginal(boardState, neighbor.q, neighbor.r);
+        if (targetCreature.size === MAX_CREATURE_SIZE) {
+          const swarmCount = countSwarmingCreaturesForBoard(boardState, targetCreature, currentPlayer, placedQ, placedR);
+          if (swarmCount >= 2) {
+            creaturesEaten.add(getCreatureSignature(targetCreature));
+          }
+        }
+      }
+    }
+  }
+  
+  let totalEaten = 0;
+  for (const signature of creaturesEaten) {
+    const creature = getCreatureFromSignatureForBoard(boardState, signature);
+    if (creature) {
+      for (const piece of creature.pieces) {
+        boardState.board.get(`${piece.q},${piece.r}`).player = EMPTY;
+        totalEaten++;
+      }
+    }
+  }
+  
+  return totalEaten;
+}
+
+function countSwarmingCreaturesForBoard(boardState, targetCreature, friendlyPlayer, excludeQ, excludeR) {
+  const swarmers = new Set();
+  
+  for (const piece of targetCreature.pieces) {
+    for (const neighbor of getNeighbors(piece.q, piece.r)) {
+      if (neighbor.q === excludeQ && neighbor.r === excludeR) continue;
+      
+      if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === friendlyPlayer) {
+        const creature = getCreatureAtForBoardOriginal(boardState, neighbor.q, neighbor.r);
+        if (creature.size === 1) {
+          swarmers.add(neighbor.key);
+        }
+      }
+    }
+  }
+  
+  return swarmers.size;
+}
+
+function getCreatureFromSignatureForBoard(boardState, signature) {
+  const [coords, playerStr] = signature.split('_');
+  const [q, r] = coords.split(',').map(Number);
+  const player = parseInt(playerStr);
+  
+  if (boardState.board.has(`${q},${r}`) && boardState.board.get(`${q},${r}`).player === player) {
+    return getCreatureAtForBoardOriginal(boardState, q, r);
+  }
+  return null;
+}
+
+function countAdjacentOpponentPieces(boardState, q, r, opponent) {
+  let count = 0;
+  for (const neighbor of getNeighbors(q, r)) {
+    if (boardState.board.has(neighbor.key) && 
+        boardState.board.get(neighbor.key).player === opponent) {
+      count++;
+    }
+  }
+  return count;
+}
+
+function countAdjacentFriendlyPieces(boardState, q, r, player) {
+  let count = 0;
+  for (const neighbor of getNeighbors(q, r)) {
+    if (boardState.board.has(neighbor.key) && 
+        boardState.board.get(neighbor.key).player === player) {
+      count++;
+    }
+  }
+  return count;
+}
+
+// AI Evaluation Functions
+function evaluateHardAI(tempBoard, q, r, player, baseScore) {
+  let score = baseScore;
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  
+  score += tempBoard.scores[player] * 10;
+  score -= tempBoard.scores[opponent] * 8;
+  
+  const placedCreature = getCreatureAtForBoardOriginal(tempBoard, q, r);
+  
+  if (placedCreature.size === 2) score += 20;
+  else if (placedCreature.size === 3) score += 35;
+  else if (placedCreature.size === 4) score += 25;
+  
+  const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
+  score += (6 - distanceFromCenter) * 5;
+  
+  const nextTurnEating = countPotentialEating(tempBoard, q, r, player);
+  score += nextTurnEating * 30;
+  
+  if (placedCreature.size === MAX_CREATURE_SIZE) {
+    const swarmThreat = countSwarmThreat(tempBoard, placedCreature, opponent);
+    score -= swarmThreat * 40;
+  }
+  
+  score += (Math.random() - 0.5) * 10;
+  
+  return score;
+}
+
+function countPotentialEating(boardState, q, r, player) {
+  const creature = getCreatureAtForBoardOriginal(boardState, q, r);
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  let eatingOpportunities = 0;
+  
+  for (const piece of creature.pieces) {
+    for (const neighbor of getNeighbors(piece.q, piece.r)) {
+      if (boardState.board.has(neighbor.key) && 
+          boardState.board.get(neighbor.key).player === opponent) {
+        const opponentCreature = getCreatureAtForBoardOriginal(boardState, neighbor.q, neighbor.r);
+        if (opponentCreature.size === creature.size - 1) {
+          eatingOpportunities++;
+        }
+      }
+    }
+  }
+  
+  return eatingOpportunities;
+}
+
+function countSwarmThreat(boardState, creature, opponent) {
+  let swarmers = 0;
+  
+  for (const piece of creature.pieces) {
+    for (const neighbor of getNeighbors(piece.q, piece.r)) {
+      if (boardState.board.has(neighbor.key) && 
+          boardState.board.get(neighbor.key).player === opponent) {
+        const enemyCreature = getCreatureAtForBoardOriginal(boardState, neighbor.q, neighbor.r);
+        if (enemyCreature.size === 1) {
+          swarmers++;
+        }
+      }
+    }
+  }
+  
+  return Math.max(0, swarmers - 2); // Need 3 to swarm, so threat starts at 3
+}
+
+// AI Optimization Functions
+function getBoardHash(boardState) {
+  let hash = '';
+  const sortedHexes = [...boardState.board.keys()].sort();
+  for (const key of sortedHexes) {
+    const cell = boardState.board.get(key);
+    hash += `${key}:${cell.player};`;
+  }
+  hash += `scores:${boardState.scores[PLAYER_BLACK]},${boardState.scores[PLAYER_WHITE]}`;
+  return hash;
+}
+
+function initializeOptimizationCaches() {
+  // Initialize killer moves array for each depth
+  killerMoves = [];
+  for (let i = 0; i <= 8; i++) {
+    killerMoves[i] = { move1: null, move2: null };
+  }
+  
+  // Clear all caches
+  transpositionTable.clear();
+  evaluationCache.clear();
+  creatureCache.clear();
+  historyHeuristic[PLAYER_BLACK].clear();
+  historyHeuristic[PLAYER_WHITE].clear();
+  
+  // Reset performance tracking
+  performanceStats = {
+    cacheHits: 0,
+    cacheMisses: 0,
+    evaluationCalls: 0,
+    transpositionHits: 0,
+    killerMoveHits: 0,
+    searchDepth: 0,
+    moveTime: 0,
+    nodesEvaluated: 0
+  };
+}
+
+function cleanupCaches() {
+  // Clean up caches when they get too large
+  if (transpositionTable.size > MAX_CACHE_SIZE) {
+    const keysToDelete = [...transpositionTable.keys()].slice(0, Math.floor(transpositionTable.size * 0.3));
+    keysToDelete.forEach(key => transpositionTable.delete(key));
+  }
+  
+  if (evaluationCache.size > MAX_CACHE_SIZE) {
+    const keysToDelete = [...evaluationCache.keys()].slice(0, Math.floor(evaluationCache.size * 0.3));
+    keysToDelete.forEach(key => evaluationCache.delete(key));
+  }
+  
+  if (creatureCache.size > MAX_CACHE_SIZE) {
+    const keysToDelete = [...creatureCache.keys()].slice(0, Math.floor(creatureCache.size * 0.3));
+    keysToDelete.forEach(key => creatureCache.delete(key));
+  }
+}
+
+function updateHistoryHeuristic(player, move, depth) {
+  const key = `${move.q},${move.r}`;
+  const current = historyHeuristic[player].get(key) || 0;
+  historyHeuristic[player].set(key, current + depth * depth);
+}
+
+function updateKillerMoves(move, depth) {
+  if (!killerMoves[depth].move1 || 
+      (killerMoves[depth].move1.q !== move.q || killerMoves[depth].move1.r !== move.r)) {
+    killerMoves[depth].move2 = killerMoves[depth].move1;
+    killerMoves[depth].move1 = move;
+  }
+}
+
+function logPerformanceStats() {
+  if (performanceStats.nodesEvaluated > 0) {
+    const cacheHitRate = (performanceStats.cacheHits / (performanceStats.cacheHits + performanceStats.cacheMisses) * 100).toFixed(1);
+    console.log('=== AI Performance Stats ===');
+    console.log(`Search depth: ${performanceStats.searchDepth}`);
+    console.log(`Move time: ${performanceStats.moveTime}ms`);
+    console.log(`Nodes evaluated: ${performanceStats.nodesEvaluated}`);
+    console.log(`Cache hit rate: ${cacheHitRate}%`);
+    console.log(`Transposition hits: ${performanceStats.transpositionHits}`);
+    console.log(`Killer move hits: ${performanceStats.killerMoveHits}`);
+    console.log(`Transposition table size: ${transpositionTable.size}`);
+    console.log(`Evaluation cache size: ${evaluationCache.size}`);
+    console.log(`Creature cache size: ${creatureCache.size}`);
+    console.log('=============================');
+  }
+}
+
+function getMoveScore(move, player, depth) {
+  const key = `${move.q},${move.r}`;
+  let score = 0;
+  
+  // History heuristic score
+  score += historyHeuristic[player].get(key) || 0;
+  
+  // Killer move bonus
+  if (killerMoves[depth].move1 && 
+      killerMoves[depth].move1.q === move.q && killerMoves[depth].move1.r === move.r) {
+    performanceStats.killerMoveHits++;
+    score += 1000;
+  } else if (killerMoves[depth].move2 && 
+             killerMoves[depth].move2.q === move.q && killerMoves[depth].move2.r === move.r) {
+    performanceStats.killerMoveHits++;
+    score += 500;
+  }
+  
+  return score;
 }
 
 function getCreatureFromSignature(signature) {
@@ -711,7 +1203,7 @@ function getAIMove() {
 
   // Expert, Master, Grandmaster and Ultimate AI: Use minimax with alpha-beta pruning
   if (game.aiDifficulty >= AI_DIFFICULTY_EXPERT) {
-    return getMinimaxMove(aiPlayer, humanPlayer, validMoves);
+    return getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves);
   }
 
   // Medium and Hard AI: Check for defensive moves
@@ -754,29 +1246,31 @@ function getAIMove() {
   return bestMove;
 }
 
-function getMinimaxMove(aiPlayer, humanPlayer, validMoves) {
+function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
+  const moveStartTime = Date.now();
+  
   // Deeper search and longer thinking time for higher difficulties
   let depth, maxThinkingTime;
   
   switch(game.aiDifficulty) {
     case AI_DIFFICULTY_EXPERT:
-      depth = 4;
+      depth = 5; // Increased from 4
       maxThinkingTime = 3000;
       break;
     case AI_DIFFICULTY_MASTER:
-      depth = 5;
+      depth = 6; // Increased from 5
       maxThinkingTime = 4000;
       break;
     case AI_DIFFICULTY_GRANDMASTER:
-      depth = 6;
+      depth = 7; // Increased from 6
       maxThinkingTime = 6000;
       break;
     case AI_DIFFICULTY_ULTIMATE:
-      depth = 7;
+      depth = 8; // Increased from 7
       maxThinkingTime = 10000;
       break;
     default:
-      depth = 4;
+      depth = 5;
       maxThinkingTime = 3000;
   }
   
@@ -788,18 +1282,18 @@ function getMinimaxMove(aiPlayer, humanPlayer, validMoves) {
   // Enhanced move ordering with multiple evaluation criteria
   const sortedMoves = validMoves.map(move => {
     const tempBoard = simulateMove(move.q, move.r, aiPlayer);
-    const moveScore = evaluateMove(move.q, move.r, aiPlayer);
+    const moveScore = evaluateMoveFast(tempBoard, move.q, move.r, aiPlayer);
     const captureScore = (tempBoard.scores[aiPlayer] - game.scores[aiPlayer]) * 1000;
     const threatScore = evaluateImmediateThreats(move.q, move.r, aiPlayer) * 100;
-    const positionalScore = evaluateMoveFast(game, move.q, move.r, aiPlayer);
+    const historyScore = getMoveScore(move, aiPlayer, 0);
     
     return {
       move,
-      score: captureScore + threatScore + moveScore + positionalScore
+      score: captureScore + threatScore + moveScore + historyScore
     };
   }).sort((a, b) => b.score - a.score).map(item => item.move);
   
-  // Iterative deepening for better move ordering
+  // Iterative deepening for better move ordering and time management
   let currentDepth = 1;
   const moveScores = new Map();
   
@@ -815,7 +1309,7 @@ function getMinimaxMove(aiPlayer, humanPlayer, validMoves) {
       if (Date.now() - startTime > maxThinkingTime * 0.9) break;
       
       const tempBoard = simulateMove(move.q, move.r, aiPlayer);
-      const score = minimax(tempBoard, currentDepth - 1, -Infinity, Infinity, false, aiPlayer, humanPlayer, startTime, maxThinkingTime);
+      const score = minimaxOptimized(tempBoard, currentDepth - 1, -Infinity, Infinity, false, aiPlayer, humanPlayer, startTime, maxThinkingTime);
       
       moveScores.set(`${move.q},${move.r}`, score);
       
@@ -833,811 +1327,278 @@ function getMinimaxMove(aiPlayer, humanPlayer, validMoves) {
     currentDepth++;
   }
   
+  // Log performance stats
+  performanceStats.searchDepth = depth;
+  performanceStats.moveTime = Date.now() - moveStartTime;
+  logPerformanceStats();
+  
   return bestMove || validMoves[0];
 }
 
-function minimax(boardState, depth, alpha, beta, isMaximizing, aiPlayer, humanPlayer, startTime, maxThinkingTime) {
+// Enhanced minimax with transposition table and move ordering
+function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer, humanPlayer, startTime, maxThinkingTime) {
+  performanceStats.nodesEvaluated++;
+  
   // Check time limit
   if (Date.now() - startTime > maxThinkingTime) {
-    return isMaximizing ? alpha : beta;
+    return isMaximizing ? -1000 : 1000; // Return neutral bound instead of potentially incorrect alpha/beta
+  }
+  
+  // Generate board hash for transposition table lookup
+  const boardHash = getBoardHash(boardState);
+  
+  // Transposition table lookup
+  const ttEntry = transpositionTable.get(boardHash);
+  if (ttEntry && ttEntry.depth >= depth) {
+    performanceStats.transpositionHits++;
+    if (ttEntry.flag === TT_EXACT) {
+      return ttEntry.score;
+    } else if (ttEntry.flag === TT_LOWERBOUND) {
+      alpha = Math.max(alpha, ttEntry.score);
+    } else if (ttEntry.flag === TT_UPPERBOUND) {
+      beta = Math.min(beta, ttEntry.score);
+    }
+    
+    if (alpha >= beta) {
+      return ttEntry.score;
+    }
   }
   
   // Terminal conditions
   if (depth === 0 || boardState.scores[aiPlayer] >= WINNING_SCORE || boardState.scores[humanPlayer] >= WINNING_SCORE) {
-    return evaluateBoardState(boardState, aiPlayer, humanPlayer);
+    const score = evaluateBoardStateCached(boardState, aiPlayer, humanPlayer);
+    
+    // Store in transposition table
+    transpositionTable.set(boardHash, {
+      score: score,
+      depth: depth,
+      flag: TT_EXACT
+    });
+    
+    return score;
   }
   
   const currentPlayer = isMaximizing ? aiPlayer : humanPlayer;
   const moves = getValidMovesForBoard(boardState, currentPlayer);
   
   if (moves.length === 0) {
-    return evaluateBoardState(boardState, aiPlayer, humanPlayer);
+    const score = evaluateBoardStateCached(boardState, aiPlayer, humanPlayer);
+    
+    // Store in transposition table
+    transpositionTable.set(boardHash, {
+      score: score,
+      depth: depth,
+      flag: TT_EXACT
+    });
+    
+    return score;
   }
   
-  // Sort moves for better alpha-beta pruning
+  // Enhanced move ordering with history heuristic and killer moves
   const sortedMoves = moves.map(move => ({
     move,
-    score: evaluateMoveFast(boardState, move.q, move.r, currentPlayer)
+    score: evaluateMoveFast(boardState, move.q, move.r, currentPlayer) + getMoveScore(move, currentPlayer, depth)
   })).sort((a, b) => isMaximizing ? b.score - a.score : a.score - b.score).map(item => item.move);
   
-  if (isMaximizing) {
-    let maxEval = -Infinity;
-    for (const move of sortedMoves) {
-      if (Date.now() - startTime > maxThinkingTime) break;
-      
-      const newBoard = simulateMoveOnBoard(boardState, move.q, move.r, currentPlayer);
-      const eval = minimax(newBoard, depth - 1, alpha, beta, false, aiPlayer, humanPlayer, startTime, maxThinkingTime);
-      maxEval = Math.max(maxEval, eval);
+  let bestScore = isMaximizing ? -Infinity : Infinity;
+  let bestMove = null;
+  let flag = TT_UPPERBOUND; // Default: all moves failed high
+  
+  for (let i = 0; i < sortedMoves.length; i++) {
+    const move = sortedMoves[i];
+    
+    if (Date.now() - startTime > maxThinkingTime) break;
+    
+    const newBoard = simulateMoveOnBoard(boardState, move.q, move.r, currentPlayer);
+    const eval = minimaxOptimized(newBoard, depth - 1, alpha, beta, !isMaximizing, aiPlayer, humanPlayer, startTime, maxThinkingTime);
+    
+    if (isMaximizing) {
+      if (eval > bestScore) {
+        bestScore = eval;
+        bestMove = move;
+      }
       alpha = Math.max(alpha, eval);
       
       if (beta <= alpha) {
-        break; // Alpha-beta pruning
+        // Beta cutoff - update history heuristic and killer moves
+        updateHistoryHeuristic(currentPlayer, move, depth);
+        updateKillerMoves(move, depth);
+        flag = TT_LOWERBOUND; // Move failed high
+        break;
       }
-    }
-    return maxEval;
-  } else {
-    let minEval = Infinity;
-    for (const move of sortedMoves) {
-      if (Date.now() - startTime > maxThinkingTime) break;
-      
-      const newBoard = simulateMoveOnBoard(boardState, move.q, move.r, currentPlayer);
-      const eval = minimax(newBoard, depth - 1, alpha, beta, true, aiPlayer, humanPlayer, startTime, maxThinkingTime);
-      minEval = Math.min(minEval, eval);
+    } else {
+      if (eval < bestScore) {
+        bestScore = eval;
+        bestMove = move;
+      }
       beta = Math.min(beta, eval);
       
       if (beta <= alpha) {
-        break; // Alpha-beta pruning
+        // Alpha cutoff - update history heuristic and killer moves
+        updateHistoryHeuristic(currentPlayer, move, depth);
+        updateKillerMoves(move, depth);
+        flag = TT_LOWERBOUND; // Move failed high
+        break;
       }
     }
-    return minEval;
-  }
-}
-
-function evaluateBoardState(boardState, aiPlayer, humanPlayer) {
-  // Terminal evaluation for minimax
-  let score = 0;
-  
-  // Primary factor: score difference with exponential scaling
-  const scoreDiff = boardState.scores[aiPlayer] - boardState.scores[humanPlayer];
-  score += scoreDiff * 150;
-  
-  // Exponential bonus for being close to winning
-  if (boardState.scores[aiPlayer] >= 10) {
-    score += Math.pow(boardState.scores[aiPlayer] - 9, 2) * 50;
-  }
-  if (boardState.scores[humanPlayer] >= 10) {
-    score -= Math.pow(boardState.scores[humanPlayer] - 9, 2) * 60;
-  }
-  
-  // Check for immediate wins/losses
-  if (boardState.scores[aiPlayer] >= WINNING_SCORE) {
-    return 15000;
-  }
-  if (boardState.scores[humanPlayer] >= WINNING_SCORE) {
-    return -15000;
-  }
-  
-  // Enhanced positional evaluation
-  const aiPositional = evaluateBoardPosition(boardState, aiPlayer);
-  const humanPositional = evaluateBoardPosition(boardState, humanPlayer);
-  score += (aiPositional - humanPositional) * 12;
-  
-  // Mobility evaluation (number of legal moves)
-  const aiMoves = getValidMovesForBoard(boardState, aiPlayer).length;
-  const humanMoves = getValidMovesForBoard(boardState, humanPlayer).length;
-  score += (aiMoves - humanMoves) * 5;
-  
-  // Piece safety evaluation
-  score += evaluatePieceSafety(boardState, aiPlayer) * 8;
-  score -= evaluatePieceSafety(boardState, humanPlayer) * 8;
-  
-  return score;
-}
-
-function evaluateBoardPosition(boardState, player) {
-  let positionScore = 0;
-  const creatureCount = { 1: 0, 2: 0, 3: 0, 4: 0 };
-  
-  for (const [key, cell] of boardState.board) {
-    if (cell.player === player) {
-      const [q, r] = key.split(',').map(Number);
-      const creature = getCreatureAtForBoard(boardState, q, r);
-      
-      if (!isNaN(creature.size) && creature.size > 0) {
-        creatureCount[creature.size]++;
-        
-        // Position bonuses
-        const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
-        positionScore += (6 - distanceFromCenter) * 0.5;
-      }
-    }
-  }
-  
-  // Creature composition bonuses
-  positionScore += creatureCount[2] * 3;
-  positionScore += creatureCount[3] * 5;
-  positionScore += creatureCount[4] * 3; // Less bonus for vulnerable size-4
-  
-  return positionScore;
-}
-
-function evaluateMoveFast(boardState, q, r, player) {
-  // Fast evaluation for move ordering in minimax
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  let score = 0;
-  
-  // Immediate captures (highest priority)
-  const captureValue = (tempBoard.scores[player] - boardState.scores[player]);
-  score += captureValue * 200;
-  
-  // Winning moves get massive bonus
-  if (tempBoard.scores[player] >= WINNING_SCORE) {
-    return 5000;
-  }
-  
-  // Prevent opponent wins
-  if (boardState.scores[opponent] >= 10) {
-    score += 300;
-  }
-  
-  // Creature size evaluation with better balance
-  const creature = getCreatureAtForBoard(tempBoard, q, r);
-  switch(creature.size) {
-    case 1: score += 2; break;
-    case 2: score += 15; break;
-    case 3: score += 30; break;
-    case 4: 
-      // Size 4 is strong but vulnerable
-      const threats = countAdjacentOpponentPieces(tempBoard, q, r, opponent);
-      score += Math.max(5, 25 - threats * 8);
-      break;
-  }
-  
-  // Central control
-  const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
-  score += (6 - distanceFromCenter) * 3;
-  
-  // Threat creation
-  score += evaluateImmediateThreats(q, r, player, tempBoard) * 10;
-  
-  // Connectivity bonus
-  const connections = countAdjacentFriendlyPieces(tempBoard, q, r, player);
-  score += connections * 8;
-  
-  return score;
-}
-
-function getValidMoves(player) {
-  const moves = [];
-  for (const hex of game.validHexes) {
-    if (game.board.get(`${hex.q},${hex.r}`).player === EMPTY) {
-      const creature = getCreatureAt(hex.q, hex.r, { q: hex.q, r: hex.r, player });
-      if (creature.size <= MAX_CREATURE_SIZE) {
-        moves.push({ q: hex.q, r: hex.r });
-      }
-    }
-  }
-  return moves;
-}
-
-function getValidMovesForBoard(board, player) {
-  const moves = [];
-  for (const hex of game.validHexes) {
-    if (board.board.get(`${hex.q},${hex.r}`).player === EMPTY) {
-      const creature = getCreatureAtForBoard(board, hex.q, hex.r, { q: hex.q, r: hex.r, player });
-      if (creature.size <= MAX_CREATURE_SIZE) {
-        moves.push({ q: hex.q, r: hex.r });
-      }
-    }
-  }
-  return moves;
-}
-
-function evaluateMove(q, r, player) {
-  const tempBoard = simulateMove(q, r, player);
-  
-  // Base score from pieces eaten
-  let score = (tempBoard.scores[player] - game.scores[player]) * 100;
-  
-  // Apply difficulty-based evaluation
-  if (game.aiDifficulty === AI_DIFFICULTY_EASY) {
-    // Easy AI: Only considers immediate eating, adds more randomness
-    score += (Math.random() - 0.5) * 50; // High randomness
-    return score;
-  }
-  
-  if (game.aiDifficulty === AI_DIFFICULTY_MEDIUM) {
-    // Medium AI: Basic strategy with some randomness
-    // Bonus for being closer to winning
-    score += tempBoard.scores[player] * 8;
     
-    // Penalty for opponent being closer to winning
-    const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-    score -= tempBoard.scores[opponent] * 6;
-    
-    // Basic creature size evaluation
-    const placedCreature = getCreatureAtForBoard(tempBoard, q, r);
-    if (placedCreature.size === 2) score += 15;
-    else if (placedCreature.size === 3) score += 25;
-    
-    // Some randomness
-    score += (Math.random() - 0.5) * 25;
-    return score;
+    // If this is the first move or we found a new best move
+    if (i === 0 || (isMaximizing && eval > alpha) || (!isMaximizing && eval < beta)) {
+      flag = TT_EXACT; // We have an exact score
+    }
   }
   
-  if (game.aiDifficulty === AI_DIFFICULTY_HARD) {
-    // Hard AI: Full strategic evaluation
-    score = evaluateHardAI(tempBoard, q, r, player, score);
-    return score;
+  // Store result in transposition table
+  transpositionTable.set(boardHash, {
+    score: bestScore,
+    depth: depth,
+    flag: flag,
+    bestMove: bestMove
+  });
+  
+  // Clean up cache if needed
+  if (transpositionTable.size > MAX_CACHE_SIZE) {
+    cleanupCaches();
   }
   
-  if (game.aiDifficulty >= AI_DIFFICULTY_EXPERT) {
-    // Expert/Master/Grandmaster/Ultimate AI: Use advanced evaluation
-    score = evaluateAdvancedAI(tempBoard, q, r, player, score);
-    return score;
-  }
-  
-  // Fallback to hard AI evaluation
-  score = evaluateHardAI(tempBoard, q, r, player, score);
-  return score;
+  return bestScore;
 }
 
-function evaluateHardAI(tempBoard, q, r, player, baseScore) {
+// AI Evaluation Caching Functions
+function getCachedEvaluation(boardHash, funcName, ...params) {
+  const cacheKey = `${funcName}|${boardHash}|${params.join('|')}`;
+  return evaluationCache.get(cacheKey);
+}
+
+function setCachedEvaluation(boardHash, funcName, result, ...params) {
+  const cacheKey = `${funcName}|${boardHash}|${params.join('|')}`;
+  evaluationCache.set(cacheKey, result);
+  
+  // Clean up cache if it gets too large
+  if (evaluationCache.size > MAX_CACHE_SIZE) {
+    cleanupCaches();
+  }
+}
+
+function evaluateBoardStateCached(boardState, aiPlayer, humanPlayer) {
+  const boardHash = getBoardHash(boardState);
+  const cached = getCachedEvaluation(boardHash, 'evaluateBoardState', aiPlayer, humanPlayer);
+  if (cached !== undefined) {
+    performanceStats.cacheHits++;
+    return cached;
+  }
+  
+  performanceStats.cacheMisses++;
+  const result = evaluateBoardStateOriginal(boardState, aiPlayer, humanPlayer);
+  setCachedEvaluation(boardHash, 'evaluateBoardState', result, aiPlayer, humanPlayer);
+  return result;
+}
+
+function evaluateAdvancedAICached(tempBoard, q, r, player, baseScore) {
+  const boardHash = getBoardHash(tempBoard);
+  const cached = getCachedEvaluation(boardHash, 'evaluateAdvancedAI', q, r, player, baseScore);
+  if (cached !== undefined) {
+    return cached;
+  }
+  
+  const result = evaluateAdvancedAIOriginal(tempBoard, q, r, player, baseScore);
+  setCachedEvaluation(boardHash, 'evaluateAdvancedAI', result, q, r, player, baseScore);
+  return result;
+}
+
+function getCreatureAtForBoardCached(boardState, q, r, overrideHex = null) {
+  const boardHash = getBoardHash(boardState);
+  const cacheKey = `${boardHash}|${q}|${r}${overrideHex ? `|${overrideHex.q}|${overrideHex.r}|${overrideHex.player}` : ''}`;
+  
+  const cached = creatureCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+  
+  const result = getCreatureAtForBoardOriginal(boardState, q, r, overrideHex);
+  creatureCache.set(cacheKey, result);
+  
+  // Clean up cache if it gets too large
+  if (creatureCache.size > MAX_CACHE_SIZE) {
+    cleanupCaches();
+  }
+  
+  return result;
+}
+
+function evaluateBoardPositionCached(boardState, player) {
+  const boardHash = getBoardHash(boardState);
+  let cached = getCachedEvaluation(boardHash, 'evaluateBoardPosition', player);
+  if (cached !== undefined) {
+    return cached;
+  }
+  
+  const result = evaluateBoardPositionOriginal(boardState, player);
+  setCachedEvaluation(boardHash, 'evaluateBoardPosition', result, player);
+  return result;
+}
+
+// Original versions of functions for caching system
+function evaluateBoardStateOriginal(boardState, aiPlayer, humanPlayer) {
+  const aiScore = boardState.scores[aiPlayer];
+  const humanScore = boardState.scores[humanPlayer];
+  
+  // Basic win/loss evaluation
+  if (aiScore >= WINNING_SCORE) return 1000;
+  if (humanScore >= WINNING_SCORE) return -1000;
+  
+  // Score difference
+  let evaluation = (aiScore - humanScore) * 50;
+  
+  // Position evaluation
+  evaluation += evaluateBoardPositionOriginal(boardState, aiPlayer);
+  evaluation -= evaluateBoardPositionOriginal(boardState, humanPlayer);
+  
+  return evaluation;
+}
+
+function evaluateAdvancedAIOriginal(tempBoard, q, r, player, baseScore) {
   let score = baseScore;
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  const placedCreature = getCreatureAtForBoardOriginal(tempBoard, q, r);
   
-  // Bonus for being closer to winning
-  score += tempBoard.scores[player] * 10;
-  
-  // Penalty for opponent being closer to winning
-  score -= tempBoard.scores[opponent] * 8;
-  
-  // Evaluate creature sizes and positions
-  const placedCreature = getCreatureAtForBoard(tempBoard, q, r);
-  
-  // Bonus for creating larger creatures (but not too large)
-  if (placedCreature.size === 2) score += 20;
-  else if (placedCreature.size === 3) score += 35;
-  else if (placedCreature.size === 4) score += 25; // Less bonus for size 4 (vulnerable)
-  
-  // Bonus for central positions
-  const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
-  score += (6 - distanceFromCenter) * 5;
-  
-  // Check if this move creates eating opportunities next turn
-  const nextTurnEating = countPotentialEating(tempBoard, q, r, player);
-  score += nextTurnEating * 30;
-  
-  // Penalty for creating vulnerable size-4 creatures
-  if (placedCreature.size === MAX_CREATURE_SIZE) {
-    const swarmThreat = countSwarmThreat(tempBoard, placedCreature, opponent);
-    score -= swarmThreat * 40;
-  }
-  
-  // Small random factor to avoid predictable play
-  score += (Math.random() - 0.5) * 10;
-  
-  return score;
-}
-
-function evaluateAdvancedAI(tempBoard, q, r, player, baseScore) {
-  let score = baseScore;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  const placedCreature = getCreatureAtForBoard(tempBoard, q, r);
-  
-  // 1. Enhanced Territory Control
+  // Territory control
   const territoryScore = evaluateTerritoryControl(tempBoard, player);
   const opponentTerritory = evaluateTerritoryControl(tempBoard, opponent);
   score += (territoryScore - opponentTerritory) * 20;
   
-  // 2. Superior Connectivity Analysis
+  // Connectivity
   const connectivityScore = evaluateConnectivity(tempBoard, player);
   score += connectivityScore * 12;
   
-  // 3. Improved Phase Strategy
-  const gamePhase = determineGamePhase(tempBoard);
-  score += evaluatePhaseStrategy(tempBoard, q, r, player, gamePhase);
-  
-  // 4. Enhanced Tactical Patterns
-  score += evaluateTacticalPatterns(tempBoard, q, r, player);
-  
-  // 5. Context-Aware Creature Placement
+  // Creature placement value
   score += evaluateCreaturePlacement(tempBoard, placedCreature, q, r);
   
-  // 6. Advanced Defensive Considerations
-  score += evaluateDefensiveValue(tempBoard, q, r, player);
+  // Distance from center
+  const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
+  score += (6 - distanceFromCenter) * 5;
   
-  // 7. Strategic Future Planning
-  score += evaluateFuturePotential(tempBoard, q, r, player);
+  // Threat evaluation
+  const threats = countAdjacentOpponentPieces(tempBoard, q, r, opponent);
+  if (placedCreature.size === MAX_CREATURE_SIZE) {
+    score -= threats * 15; // Large creatures are vulnerable
+  }
   
-  // 8. Threat Prevention and Creation
-  score += evaluateThreatDynamics(tempBoard, q, r, player);
-  
-  // 9. Minimize randomness for consistent high-level play
+  // Random factor based on difficulty
   let randomFactor;
   switch(game.aiDifficulty) {
-    case AI_DIFFICULTY_EXPERT:
-      randomFactor = 3;
-      break;
-    case AI_DIFFICULTY_MASTER:
-      randomFactor = 1.5;
-      break;
-    case AI_DIFFICULTY_GRANDMASTER:
-      randomFactor = 0.8;
-      break;
-    case AI_DIFFICULTY_ULTIMATE:
-      randomFactor = 0.3;
-      break;
-    default:
-      randomFactor = 3;
+    case AI_DIFFICULTY_EXPERT: randomFactor = 3; break;
+    case AI_DIFFICULTY_MASTER: randomFactor = 1.5; break;
+    case AI_DIFFICULTY_GRANDMASTER: randomFactor = 0.8; break;
+    case AI_DIFFICULTY_ULTIMATE: randomFactor = 0.3; break;
+    default: randomFactor = 3;
   }
   score += (Math.random() - 0.5) * randomFactor;
-  
-  // 10. Grandmaster and Ultimate level enhancements
-  if (game.aiDifficulty >= AI_DIFFICULTY_GRANDMASTER) {
-    // Deep tactical analysis
-    score += evaluateMultiMoveTactics(tempBoard, q, r, player);
-    
-    // Advanced positional mastery
-    score += evaluateAdvancedPositional(tempBoard, q, r, player);
-    
-    // Endgame precision
-    if (determineGamePhase(tempBoard) === 'endgame') {
-      score += evaluateEndgamePrecision(tempBoard, q, r, player);
-    }
-    
-    // King safety for important pieces
-    score += evaluateKeyPieceSafety(tempBoard, player);
-  }
   
   return score;
 }
 
-// Enhanced evaluation functions for Grandmaster and Ultimate AI levels
-function evaluateMultiMoveTactics(boardState, q, r, player) {
-  let tacticalScore = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Enhanced lookahead for tactical sequences
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  
-  // 1. Sacrifice combinations that lead to bigger gains
-  const ourScore = tempBoard.scores[player];
-  const opponentMoves = getValidMovesForBoard(tempBoard, opponent);
-  
-  let maxCounterplayValue = -Infinity;
-  
-  // Analyze top opponent responses
-  const sortedOpponentMoves = opponentMoves.map(move => ({
-    move,
-    value: evaluateMoveFast(tempBoard, move.q, move.r, opponent)
-  })).sort((a, b) => b.value - a.value).slice(0, 6);
-  
-  for (const opMove of sortedOpponentMoves) {
-    const opTempBoard = simulateMoveOnBoard(tempBoard, opMove.move.q, opMove.move.r, opponent);
-    const ourFollowUps = getValidMovesForBoard(opTempBoard, player);
-    
-    // Analyze our best counter-responses
-    const sortedFollowUps = ourFollowUps.map(move => ({
-      move,
-      value: evaluateMoveFast(opTempBoard, move.q, move.r, player)
-    })).sort((a, b) => b.value - a.value).slice(0, 4);
-    
-    for (const followUp of sortedFollowUps) {
-      const finalBoard = simulateMoveOnBoard(opTempBoard, followUp.move.q, followUp.move.r, player);
-      const finalValue = (finalBoard.scores[player] - ourScore) * 80;
-      
-      // Bonus for creating forcing sequences
-      if (finalBoard.scores[player] > opTempBoard.scores[player] + 1) {
-        tacticalScore += finalValue * 0.8;
-      }
-      
-      maxCounterplayValue = Math.max(maxCounterplayValue, finalValue);
-    }
-  }
-  
-  // 2. Fork and pin tactics
-  const forkValue = evaluateAdvancedForks(tempBoard, q, r, player);
-  tacticalScore += forkValue * 25;
-  
-  // 3. Breakthrough sequences
-  const breakthroughValue = evaluateBreakthroughSequences(tempBoard, q, r, player);
-  tacticalScore += breakthroughValue * 30;
-  
-  if (maxCounterplayValue > 0) {
-    tacticalScore += maxCounterplayValue * 0.6;
-  }
-  
-  return Math.min(tacticalScore, 200); // Cap to prevent evaluation explosion
-}
-
-function evaluateAdvancedPositional(boardState, q, r, player) {
-  let positionalScore = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Advanced pawn structure concepts
-  // 1. Weak squares (empty spaces surrounded by enemy pieces)
-  const weakSquareControl = evaluateWeakSquareControl(boardState, q, r, player);
-  positionalScore += weakSquareControl * 12;
-  
-  // 2. Piece activity (how many squares each piece controls)
-  const activityScore = evaluatePieceActivity(boardState, q, r, player);
-  positionalScore += activityScore * 8;
-  
-  // 3. King safety equivalent (protecting your largest creatures)
-  const largestCreatureSafety = evaluateLargestCreatureSafety(boardState, player);
-  positionalScore += largestCreatureSafety * 20;
-  
-  // 4. Space advantage (controlling more of the board)
-  const spaceAdvantage = evaluateSpaceAdvantage(boardState, player, opponent);
-  positionalScore += spaceAdvantage * 6;
-  
-  return positionalScore;
-}
-
-function evaluateEndgamePrecision(boardState, q, r, player) {
-  let endgameScore = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // In endgame, focus on:
-  // 1. Converting advantages into wins
-  const scoreAdvantage = boardState.scores[player] - boardState.scores[opponent];
-  if (scoreAdvantage > 0) {
-    // We're ahead, play more conservatively but efficiently
-    const conservativeBonus = evaluateConservativePlay(boardState, q, r, player);
-    endgameScore += conservativeBonus * 15;
-  } else {
-    // We're behind, need to take risks and create complications
-    const complicationBonus = evaluateComplications(boardState, q, r, player);
-    endgameScore += complicationBonus * 25;
-  }
-  
-  // 2. Piece coordination in endgame
-  const coordinationScore = evaluateEndgameCoordination(boardState, q, r, player);
-  endgameScore += coordinationScore * 10;
-  
-  // 3. Precise calculation (avoid moves that don't improve position)
-  const progressScore = evaluateProgress(boardState, q, r, player);
-  endgameScore += progressScore * 8;
-  
-  return endgameScore;
-}
-
-// Helper functions for advanced positional evaluation
-function evaluateWeakSquareControl(boardState, q, r, player) {
-  let control = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Check if this move controls important weak squares
-  for (const neighbor of getNeighbors(q, r)) {
-    if (!boardState.board.has(neighbor.key) || 
-        boardState.board.get(neighbor.key).player === EMPTY) {
-      // This is an empty square we now influence
-      let enemyNeighbors = 0;
-      for (const subNeighbor of getNeighbors(neighbor.q, neighbor.r)) {
-        if (boardState.board.has(subNeighbor.key) && 
-            boardState.board.get(subNeighbor.key).player === opponent) {
-          enemyNeighbors++;
-        }
-      }
-      if (enemyNeighbors >= 2) {
-        control += 3; // Controlling a weak square
-      }
-    }
-  }
-  
-  return control;
-}
-
-function evaluatePieceActivity(boardState, q, r, player) {
-  // Count how many squares this piece can influence
-  let activity = 0;
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  const creature = getCreatureAtForBoard(tempBoard, q, r);
-  
-  // Larger creatures have more activity
-  activity += creature.size * 3;
-  
-  // Pieces in center are more active
-  const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
-  activity += (6 - distanceFromCenter) * 2;
-  
-  return activity;
-}
-
-function evaluateLargestCreatureSafety(boardState, player) {
-  let safety = 0;
-  let largestSize = 0;
-  let largestCreature = null;
-  
-  // Find largest creature
-  for (const [key, cell] of boardState.board) {
-    if (cell.player === player) {
-      const [q, r] = key.split(',').map(Number);
-      const creature = getCreatureAtForBoard(boardState, q, r);
-      if (creature.size > largestSize) {
-        largestSize = creature.size;
-        largestCreature = creature;
-      }
-    }
-  }
-  
-  if (largestCreature && largestSize >= 3) {
-    // Check how protected this creature is
-    const enemyThreats = countSurroundingEnemies(boardState, largestCreature);
-    safety = Math.max(0, 10 - enemyThreats * 3);
-  }
-  
-  return safety;
-}
-
-function evaluateSpaceAdvantage(boardState, player, opponent) {
-  let playerInfluence = 0;
-  let opponentInfluence = 0;
-  
-  // Count influenced squares for both players
-  for (const [key, cell] of boardState.board) {
-    if (cell.player === EMPTY) {
-      const [q, r] = key.split(',').map(Number);
-      let playerNeighbors = 0;
-      let opponentNeighbors = 0;
-      
-      for (const neighbor of getNeighbors(q, r)) {
-        if (boardState.board.has(neighbor.key)) {
-          const neighCell = boardState.board.get(neighbor.key);
-          if (neighCell.player === player) playerNeighbors++;
-          else if (neighCell.player === opponent) opponentNeighbors++;
-        }
-      }
-      
-      if (playerNeighbors > opponentNeighbors) playerInfluence++;
-      else if (opponentNeighbors > playerNeighbors) opponentInfluence++;
-    }
-  }
-  
-  return playerInfluence - opponentInfluence;
-}
-
-function evaluateConservativePlay(boardState, q, r, player) {
-  // When ahead, prefer safe moves that maintain advantage
-  let conservativeScore = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Prefer moves that don't expose pieces to counterattack
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  const exposureRisk = countExposureRisk(tempBoard, q, r, opponent);
-  conservativeScore -= exposureRisk * 5;
-  
-  // Prefer moves that consolidate position
-  const consolidationBonus = evaluateConsolidation(tempBoard, q, r, player);
-  conservativeScore += consolidationBonus * 8;
-  
-  return conservativeScore;
-}
-
-function evaluateComplications(boardState, q, r, player) {
-  // When behind, prefer moves that create tactical complexity
-  let complicationScore = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Prefer moves that create multiple threats
-  const multipleThreats = countMultipleThreats(boardState, q, r, player);
-  complicationScore += multipleThreats * 12;
-  
-  // Prefer sacrificial moves that lead to counterplay
-  const sacrificeValue = evaluateSacrificeCounterplay(boardState, q, r, player);
-  complicationScore += sacrificeValue * 10;
-  
-  return complicationScore;
-}
-
-function evaluateEndgameCoordination(boardState, q, r, player) {
-  // In endgame, pieces should work together
-  let coordination = 0;
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  
-  // Count how many friendly pieces this move supports
-  let supportedPieces = 0;
-  for (const neighbor of getNeighbors(q, r)) {
-    if (tempBoard.board.has(neighbor.key) && 
-        tempBoard.board.get(neighbor.key).player === player) {
-      supportedPieces++;
-    }
-  }
-  
-  coordination += supportedPieces * 4;
-  
-  return coordination;
-}
-
-function evaluateProgress(boardState, q, r, player) {
-  // Moves should improve position or threaten to improve it
-  let progress = 0;
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  
-  // Progress = better score position + better positional factors
-  const scoreDiff = tempBoard.scores[player] - boardState.scores[player];
-  progress += scoreDiff * 20;
-  
-  // Positional progress (harder to quantify but try)
-  const newPieceValue = evaluatePieceActivity(boardState, q, r, player);
-  progress += newPieceValue * 0.5;
-  
-  return progress;
-}
-
-// Simplified helper functions for the most complex evaluations
-function countExposureRisk(boardState, q, r, opponent) {
-  // Count how many opponent pieces can potentially attack this position
-  let risk = 0;
-  for (const neighbor of getNeighbors(q, r)) {
-    if (boardState.board.has(neighbor.key) && 
-        boardState.board.get(neighbor.key).player === opponent) {
-      risk++;
-    }
-  }
-  return risk;
-}
-
-function evaluateConsolidation(boardState, q, r, player) {
-  // Measure how well this move connects with existing pieces
-  let consolidation = 0;
-  let friendlyNeighbors = 0;
-  
-  for (const neighbor of getNeighbors(q, r)) {
-    if (boardState.board.has(neighbor.key) && 
-        boardState.board.get(neighbor.key).player === player) {
-      friendlyNeighbors++;
-    }
-  }
-  
-  consolidation = friendlyNeighbors * 3;
-  return consolidation;
-}
-
-function countMultipleThreats(boardState, q, r, player) {
-  // Count how many different threats this move creates
-  let threats = 0;
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Check if we threaten multiple opponent creatures
-  const threatenedCreatures = new Set();
-  for (const neighbor of getNeighbors(q, r)) {
-    if (tempBoard.board.has(neighbor.key) && 
-        tempBoard.board.get(neighbor.key).player === opponent) {
-      const creature = getCreatureAtForBoard(tempBoard, neighbor.q, neighbor.r);
-      threatenedCreatures.add(getCreatureSignature(creature));
-    }
-  }
-  
-  threats = threatenedCreatures.size;
-  return threats;
-}
-
-function evaluateSacrificeCounterplay(boardState, q, r, player) {
-  // Evaluate if losing this piece creates counterplay opportunities
-  let counterplay = 0;
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // If this piece can be captured, does it expose opponent pieces?
-  const captureableBy = [];
-  for (const neighbor of getNeighbors(q, r)) {
-    if (tempBoard.board.has(neighbor.key) && 
-        tempBoard.board.get(neighbor.key).player === opponent) {
-      captureableBy.push(neighbor);
-    }
-  }
-  
-  if (captureableBy.length > 0) {
-    // If we can be captured, check what we threaten in return
-    counterplay += countMultipleThreats(boardState, q, r, player) * 2;
-  }
-  
-  return counterplay;
-}
-
-function simulateMove(q, r, player) {
-  // Create a deep copy of the game state
-  const tempBoard = {
-    board: new Map(),
-    scores: { ...game.scores },
-    piecesInHand: { ...game.piecesInHand }
-  };
-  
-  // Copy board state
-  for (const [key, value] of game.board) {
-    tempBoard.board.set(key, { ...value });
-  }
-  
-  // Simulate the move
-  tempBoard.board.get(`${q},${r}`).player = player;
-  tempBoard.piecesInHand[player]--;
-  
-  // Process eating and swarming
-  const piecesEaten = processEatingAndSwarmingForBoard(tempBoard, q, r, player);
-  tempBoard.scores[player] += piecesEaten;
-  
-  return tempBoard;
-}
-
-function simulateMoveOnBoard(boardState, q, r, player) {
-  // Create a deep copy of the board state
-  const tempBoard = {
-    board: new Map(),
-    scores: { ...boardState.scores },
-    piecesInHand: { ...boardState.piecesInHand }
-  };
-  
-  // Copy board state
-  for (const [key, value] of boardState.board) {
-    tempBoard.board.set(key, { ...value });
-  }
-  
-  // Simulate the move
-  tempBoard.board.get(`${q},${r}`).player = player;
-  tempBoard.piecesInHand[player]--;
-  
-  // Process eating and swarming
-  const piecesEaten = processEatingAndSwarmingForBoard(tempBoard, q, r, player);
-  tempBoard.scores[player] += piecesEaten;
-  
-  return tempBoard;
-}
-
-function processEatingAndSwarmingForBoard(boardState, placedQ, placedR, currentPlayer) {
-  const placedCreature = getCreatureAtForBoard(boardState, placedQ, placedR);
-  const opponent = currentPlayer === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  const creaturesEaten = new Set();
-  
-  // Rule 1: Eating
-  if (placedCreature.size > 1) {
-    for (const piece of placedCreature.pieces) {
-      for (const neighbor of getNeighbors(piece.q, piece.r)) {
-        if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === opponent) {
-          const opponentCreature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
-          if (opponentCreature.size === placedCreature.size - 1) {
-            creaturesEaten.add(getCreatureSignature(opponentCreature));
-          }
-        }
-      }
-    }
-  }
-  
-  // Rule 2: Swarming
-  if (placedCreature.size === 1) {
-    for (const neighbor of getNeighbors(placedQ, placedR)) {
-      if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === opponent) {
-        const targetCreature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
-        if (targetCreature.size === MAX_CREATURE_SIZE) {
-          const swarmCount = countSwarmingCreaturesForBoard(boardState, targetCreature, currentPlayer, placedQ, placedR);
-          if (swarmCount >= 2) {
-            creaturesEaten.add(getCreatureSignature(targetCreature));
-          }
-        }
-      }
-    }
-  }
-  
-  // Remove eaten creatures
-  let totalEaten = 0;
-  for (const signature of creaturesEaten) {
-    const creature = getCreatureFromSignatureForBoard(boardState, signature);
-    if (creature) {
-      for (const piece of creature.pieces) {
-        boardState.board.get(`${piece.q},${piece.r}`).player = EMPTY;
-        totalEaten++;
-      }
-    }
-  }
-  
-  return totalEaten;
-}
-
-function getCreatureAtForBoard(boardState, startQ, startR, hypotheticalPiece = null) {
+function getCreatureAtForBoardOriginal(boardState, startQ, startR, hypotheticalPiece = null) {
   const board = hypotheticalPiece ? 
     new Map([...boardState.board, [`${hypotheticalPiece.q},${hypotheticalPiece.r}`, hypotheticalPiece]]) :
     boardState.board;
@@ -1651,8 +1612,10 @@ function getCreatureAtForBoard(boardState, startQ, startR, hypotheticalPiece = n
   const visited = new Set();
   const queue = [{ q: startQ, r: startR }];
   const pieces = [];
+  let iterations = 0;
+  const maxIterations = 1000; // Safety limit
   
-  while (queue.length > 0) {
+  while (queue.length > 0 && iterations < maxIterations) {
     const current = queue.shift();
     const key = `${current.q},${current.r}`;
     
@@ -1667,91 +1630,63 @@ function getCreatureAtForBoard(boardState, startQ, startR, hypotheticalPiece = n
         queue.push({ q: neighbor.q, r: neighbor.r });
       }
     }
+    iterations++;
   }
   
   return { pieces, size: pieces.length, player: targetPlayer };
 }
 
-function countSwarmingCreaturesForBoard(boardState, targetCreature, friendlyPlayer, excludeQ, excludeR) {
-  const swarmers = new Set();
-  
-  for (const piece of targetCreature.pieces) {
-    for (const neighbor of getNeighbors(piece.q, piece.r)) {
-      if (neighbor.q === excludeQ && neighbor.r === excludeR) continue;
-      
-      if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === friendlyPlayer) {
-        const creature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
-        if (creature.size === 1) {
-          swarmers.add(neighbor.key);
-        }
-      }
-    }
-  }
-  
-  return swarmers.size;
-}
-
-function getCreatureFromSignatureForBoard(boardState, signature) {
-  const [coords, playerStr] = signature.split('_');
-  const [q, r] = coords.split(',').map(Number);
-  const player = parseInt(playerStr);
-  
-  if (boardState.board.has(`${q},${r}`) && boardState.board.get(`${q},${r}`).player === player) {
-    return getCreatureAtForBoard(boardState, q, r);
-  }
-  return null;
-}
-
-function countPotentialEating(boardState, q, r, player) {
-  const creature = getCreatureAtForBoard(boardState, q, r);
+function evaluateBoardPositionOriginal(boardState, player) {
+  let positionScore = 0;
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  let eatingOpportunities = 0;
   
-  for (const piece of creature.pieces) {
-    for (const neighbor of getNeighbors(piece.q, piece.r)) {
-      if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === opponent) {
-        const opponentCreature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
-        if (opponentCreature.size === creature.size - 1) {
-          eatingOpportunities++;
-        }
+  // Evaluate each piece/creature
+  const visitedHexes = new Set();
+  for (const [key, cell] of boardState.board) {
+    if (cell.player === player && !visitedHexes.has(key)) {
+      const [q, r] = key.split(',').map(Number);
+      const creature = getCreatureAtForBoardOriginal(boardState, q, r);
+      
+      // Mark all pieces of this creature as visited
+      for (const piece of creature.pieces) {
+        visitedHexes.add(`${piece.q},${piece.r}`);
       }
-    }
-  }
-  
-  return eatingOpportunities;
-}
-
-function countSwarmThreat(boardState, targetCreature, opponent) {
-  const swarmers = new Set();
-  
-  for (const piece of targetCreature.pieces) {
-    for (const neighbor of getNeighbors(piece.q, piece.r)) {
-      if (boardState.board.has(neighbor.key)) {
-        const cell = boardState.board.get(neighbor.key);
-        if (cell.player === EMPTY) {
-          // Count empty spaces that could become swarmers
-          swarmers.add(neighbor.key);
-        } else if (cell.player === opponent) {
-          const creature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
-          if (creature.size === 1) {
-            swarmers.add(neighbor.key);
+      
+      // Score based on creature size
+      switch(creature.size) {
+        case 1: positionScore += 5; break;
+        case 2: positionScore += 20; break;
+        case 3: positionScore += 35; break;
+        case 4: positionScore += 25; break; // Less valuable due to swarm risk
+      }
+      
+      // Central position bonus
+      const avgQ = creature.pieces.reduce((sum, p) => sum + p.q, 0) / creature.pieces.length;
+      const avgR = creature.pieces.reduce((sum, p) => sum + p.r, 0) / creature.pieces.length;
+      const distanceFromCenter = Math.abs(avgQ) + Math.abs(avgR) + Math.abs(-avgQ - avgR);
+      positionScore += (6 - distanceFromCenter) * 2;
+      
+      // Connectivity bonus
+      let connectivityBonus = 0;
+      for (const piece of creature.pieces) {
+        for (const neighbor of getNeighbors(piece.q, piece.r)) {
+          if (boardState.board.has(neighbor.key) && 
+              boardState.board.get(neighbor.key).player === player) {
+            connectivityBonus += 1;
           }
         }
       }
+      positionScore += connectivityBonus * 2;
     }
   }
   
-  return Math.max(0, swarmers.size - 2); // Threat level based on how many swarmers are possible
+  return positionScore;
 }
 
-// Advanced AI Evaluation Functions for Expert and Master levels
-
+// Support functions for advanced AI evaluation
 function evaluateTerritoryControl(boardState, player) {
   let territoryScore = 0;
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Count influenced hexes (hexes adjacent to player's pieces)
-  const influencedHexes = new Set();
   
   for (const [key, cell] of boardState.board) {
     if (cell.player === player) {
@@ -1760,292 +1695,53 @@ function evaluateTerritoryControl(boardState, player) {
         if (boardState.board.has(neighbor.key)) {
           const neighborCell = boardState.board.get(neighbor.key);
           if (neighborCell.player === EMPTY || neighborCell.player === opponent) {
-            influencedHexes.add(neighbor.key);
+            territoryScore++;
           }
         }
       }
     }
   }
   
-  return influencedHexes.size;
+  return territoryScore;
 }
 
 function evaluateConnectivity(boardState, player) {
-  // Evaluate how well connected the player's pieces are
   let connectivityScore = 0;
   const visited = new Set();
   
   for (const [key, cell] of boardState.board) {
     if (cell.player === player && !visited.has(key)) {
       const [q, r] = key.split(',').map(Number);
-      const creature = getCreatureAtForBoard(boardState, q, r);
+      const creature = getCreatureAtForBoardOriginal(boardState, q, r);
       
-      // Mark all pieces of this creature as visited
       for (const piece of creature.pieces) {
         visited.add(`${piece.q},${piece.r}`);
       }
       
-      // Bonus for creature size (connected pieces)
       connectivityScore += creature.size * creature.size;
-      
-      // Bonus for having neighbors of other creatures
-      let neighboringCreatures = 0;
-      for (const piece of creature.pieces) {
-        for (const neighbor of getNeighbors(piece.q, piece.r)) {
-          if (boardState.board.has(neighbor.key) && 
-              boardState.board.get(neighbor.key).player === player &&
-              !visited.has(neighbor.key)) {
-            neighboringCreatures++;
-          }
-        }
-      }
-      connectivityScore += neighboringCreatures * 2;
     }
   }
   
   return connectivityScore;
 }
 
-function determineGamePhase(boardState) {
-  const totalPieces = boardState.piecesInHand[PLAYER_BLACK] + boardState.piecesInHand[PLAYER_WHITE];
-  const totalPlaced = 24 - totalPieces; // Each player starts with 12 pieces
-  
-  if (totalPlaced < 8) return 'opening';
-  if (totalPlaced < 16) return 'midgame';
-  return 'endgame';
-}
-
-function evaluatePhaseStrategy(boardState, q, r, player, phase) {
-  let phaseScore = 0;
-  const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
-  
-  if (phase === 'opening') {
-    // Opening: Focus on central control and spread
-    phaseScore += (6 - distanceFromCenter) * 8;
-    
-    // Bonus for not clustering too much early
-    const nearbyAllies = countNearbyAllies(boardState, q, r, player);
-    if (nearbyAllies < 2) phaseScore += 10;
-    
-  } else if (phase === 'midgame') {
-    // Midgame: Balance between offense and defense
-    phaseScore += (6 - distanceFromCenter) * 4;
-    
-    // Bonus for supporting existing creatures
-    const nearbyAllies = countNearbyAllies(boardState, q, r, player);
-    phaseScore += nearbyAllies * 8;
-    
-  } else { // endgame
-    // Endgame: Focus on consolidation and attack
-    const nearbyAllies = countNearbyAllies(boardState, q, r, player);
-    phaseScore += nearbyAllies * 12;
-    
-    // Prefer moves that create immediate threats
-    const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-    const threateningMoves = countThreateningMoves(boardState, q, r, player, opponent);
-    phaseScore += threateningMoves * 20;
-  }
-  
-  return phaseScore;
-}
-
-function evaluateTacticalPatterns(boardState, q, r, player) {
-  let tacticalScore = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Pattern 1: Fork attacks (threatening multiple enemy creatures)
-  const forkedTargets = countForkedTargets(boardState, q, r, player);
-  tacticalScore += forkedTargets * 25;
-  
-  // Pattern 2: Defensive formations (protecting vulnerable allies)
-  const protectedAllies = countProtectedAllies(boardState, q, r, player);
-  tacticalScore += protectedAllies * 15;
-  
-  // Pattern 3: Chain attacks (setting up multi-turn combinations)
-  const chainPotential = evaluateChainPotential(boardState, q, r, player);
-  tacticalScore += chainPotential * 20;
-  
-  // Pattern 4: Breakthrough opportunities
-  const breakthroughValue = evaluateBreakthrough(boardState, q, r, player);
-  tacticalScore += breakthroughValue * 30;
-  
-  return tacticalScore;
-}
-
 function evaluateCreaturePlacement(boardState, creature, q, r) {
   let placementScore = 0;
   
-  // Enhanced creature size evaluation
   switch(creature.size) {
-    case 1:
-      placementScore += 5; // Base value for single pieces
-      break;
-    case 2:
-      placementScore += 25; // Good balance
-      break;
-    case 3:
-      placementScore += 45; // Strong offensive piece
-      break;
+    case 1: placementScore += 5; break;
+    case 2: placementScore += 25; break;
+    case 3: placementScore += 45; break;
     case 4:
-      // Context-dependent: strong but vulnerable
       const surroundingEnemies = countSurroundingEnemies(boardState, creature);
       placementScore += 35 - (surroundingEnemies * 10);
       break;
   }
   
-  // Bonus for edge control (harder to surround)
   const edgeBonus = isNearEdge(q, r) ? 5 : 0;
   placementScore += edgeBonus;
   
   return placementScore;
-}
-
-function evaluateDefensiveValue(boardState, q, r, player) {
-  let defensiveScore = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Check if this move blocks opponent's threats
-  const blockedThreats = countBlockedThreats(boardState, q, r, player, opponent);
-  defensiveScore += blockedThreats * 35;
-  
-  // Check if this move prevents opponent from winning
-  const preventedWins = countPreventedWins(boardState, q, r, player, opponent);
-  defensiveScore += preventedWins * 100;
-  
-  return defensiveScore;
-}
-
-function evaluateFuturePotential(boardState, q, r, player) {
-  let futureScore = 0;
-  
-  // Count empty spaces around this position for future expansion
-  const expansionPotential = countExpansionPotential(boardState, q, r);
-  futureScore += expansionPotential * 3;
-  
-  // Evaluate potential for future combinations
-  const combinationPotential = evaluateCombinationPotential(boardState, q, r, player);
-  futureScore += combinationPotential * 8;
-  
-  return futureScore;
-}
-
-// Helper functions for advanced evaluation
-
-function countNearbyAllies(boardState, q, r, player) {
-  let count = 0;
-  for (const neighbor of getNeighbors(q, r)) {
-    if (boardState.board.has(neighbor.key) && 
-        boardState.board.get(neighbor.key).player === player) {
-      count++;
-    }
-  }
-  return count;
-}
-
-function countThreateningMoves(boardState, q, r, player, opponent) {
-  let threats = 0;
-  const creature = getCreatureAtForBoard(boardState, q, r);
-  
-  if (creature.size > 1) {
-    for (const piece of creature.pieces) {
-      for (const neighbor of getNeighbors(piece.q, piece.r)) {
-        if (boardState.board.has(neighbor.key) && 
-            boardState.board.get(neighbor.key).player === opponent) {
-          const enemyCreature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
-          if (enemyCreature.size === creature.size - 1) {
-            threats++;
-          }
-        }
-      }
-    }
-  }
-  
-  return threats;
-}
-
-function countForkedTargets(boardState, q, r, player) {
-  const creature = getCreatureAtForBoard(boardState, q, r);
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  const threatenedCreatures = new Set();
-  
-  if (creature.size > 1) {
-    for (const piece of creature.pieces) {
-      for (const neighbor of getNeighbors(piece.q, piece.r)) {
-        if (boardState.board.has(neighbor.key) && 
-            boardState.board.get(neighbor.key).player === opponent) {
-          const enemyCreature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
-          if (enemyCreature.size === creature.size - 1) {
-            threatenedCreatures.add(getCreatureSignature(enemyCreature));
-          }
-        }
-      }
-    }
-  }
-  
-  return Math.max(0, threatenedCreatures.size - 1); // Fork = threatening 2+ targets
-}
-
-function countProtectedAllies(boardState, q, r, player) {
-  let protected = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  for (const neighbor of getNeighbors(q, r)) {
-    if (boardState.board.has(neighbor.key) && 
-        boardState.board.get(neighbor.key).player === player) {
-      const allyCreature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
-      if (allyCreature.size === MAX_CREATURE_SIZE) {
-        // Check if placing here reduces swarm threat
-        const currentThreat = countSwarmThreat(boardState, allyCreature, opponent);
-        // Simulate placing the piece and check new threat level
-        if (currentThreat > 0) protected++;
-      }
-    }
-  }
-  
-  return protected;
-}
-
-function evaluateChainPotential(boardState, q, r, player) {
-  // Look for opportunities to set up multi-move combinations
-  let chainValue = 0;
-  const creature = getCreatureAtForBoard(boardState, q, r);
-  
-  // Check if this creates a setup for next turn
-  if (creature.size >= 2) {
-    const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-    
-    // Look for positions where we could place next turn to create threats
-    for (const [key, cell] of boardState.board) {
-      if (cell.player === EMPTY) {
-        const [nq, nr] = key.split(',').map(Number);
-        const distance = Math.abs(q - nq) + Math.abs(r - nr) + Math.abs(-q - r + nq + nr);
-        
-        if (distance <= 2) { // Within reasonable range
-          // Check if placing there next turn would create value
-          const futureCreature = getCreatureAtForBoard(boardState, nq, nr, {q: nq, r: nr, player: player});
-          if (futureCreature.size >= 2) {
-            chainValue += 5;
-          }
-        }
-      }
-    }
-  }
-  
-  return Math.min(chainValue, 20); // Cap the chain value
-}
-
-function evaluateBreakthrough(boardState, q, r, player) {
-  // Evaluate if this move creates breakthrough opportunities
-  let breakthroughValue = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Check if this move penetrates enemy territory
-  const enemyDensity = countEnemyDensity(boardState, q, r, opponent);
-  if (enemyDensity >= 3) {
-    breakthroughValue += 15; // Bonus for penetrating enemy clusters
-  }
-  
-  return breakthroughValue;
 }
 
 function countSurroundingEnemies(boardState, creature) {
@@ -2054,7 +1750,7 @@ function countSurroundingEnemies(boardState, creature) {
   
   for (const piece of creature.pieces) {
     for (const neighbor of getNeighbors(piece.q, piece.r)) {
-      if (boardState.board.has(neighbor.key) && 
+      if (boardState.board.has(neighbor.key) &&
           boardState.board.get(neighbor.key).player === opponent) {
         enemyCount++;
       }
@@ -2066,306 +1762,7 @@ function countSurroundingEnemies(boardState, creature) {
 
 function isNearEdge(q, r) {
   const distance = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
-  return distance >= 4; // Near the edge of a size-6 hex grid
-}
-
-function countBlockedThreats(boardState, q, r, player, opponent) {
-  let blockedThreats = 0;
-  
-  // Check if placing here blocks opponent's eating opportunities
-  for (const neighbor of getNeighbors(q, r)) {
-    if (boardState.board.has(neighbor.key) && 
-        boardState.board.get(neighbor.key).player === opponent) {
-      const enemyCreature = getCreatureAtForBoard(boardState, neighbor.q, neighbor.r);
-      
-      // Check if this enemy creature was threatening our pieces
-      for (const enemyPiece of enemyCreature.pieces) {
-        for (const enemyNeighbor of getNeighbors(enemyPiece.q, enemyPiece.r)) {
-          if (boardState.board.has(enemyNeighbor.key) && 
-              boardState.board.get(enemyNeighbor.key).player === player) {
-            const ourCreature = getCreatureAtForBoard(boardState, enemyNeighbor.q, enemyNeighbor.r);
-            if (ourCreature.size === enemyCreature.size - 1) {
-              blockedThreats++;
-            }
-          }
-        }
-      }
-    }
-  }
-  
-  return blockedThreats;
-}
-
-function countPreventedWins(boardState, q, r, player, opponent) {
-  let preventedWins = 0;
-  
-  // Check if opponent was about to win and this move prevents it
-  const opponentMoves = getValidMovesForBoard(boardState, opponent);
-  for (const move of opponentMoves) {
-    const testBoard = simulateMoveOnBoard(boardState, move.q, move.r, opponent);
-    if (testBoard.scores[opponent] >= WINNING_SCORE) {
-      // Check if our move interferes with this winning move
-      if (move.q === q && move.r === r) {
-        preventedWins++;
-      }
-    }
-  }
-  
-  return preventedWins;
-}
-
-function countExpansionPotential(boardState, q, r) {
-  let emptyNeighbors = 0;
-  for (const neighbor of getNeighbors(q, r)) {
-    if (boardState.board.has(neighbor.key) && 
-        boardState.board.get(neighbor.key).player === EMPTY) {
-      emptyNeighbors++;
-    }
-  }
-  return emptyNeighbors;
-}
-
-function evaluateCombinationPotential(boardState, q, r, player) {
-  let potential = 0;
-  
-  // Look for potential future creature formations
-  for (const neighbor of getNeighbors(q, r)) {
-    if (boardState.board.has(neighbor.key)) {
-      const cell = boardState.board.get(neighbor.key);
-      if (cell.player === EMPTY) {
-        // Potential for future expansion
-        potential += 2;
-      } else if (cell.player === player) {
-        // Potential for strengthening existing creatures
-        potential += 3;
-      }
-    }
-  }
-  
-  return potential;
-}
-
-function countEnemyDensity(boardState, q, r, opponent) {
-  let density = 0;
-  const radius = 2; // Check within 2-hex radius
-  
-  for (const [key, cell] of boardState.board) {
-    if (cell.player === opponent) {
-      const [eq, er] = key.split(',').map(Number);
-      const distance = Math.abs(q - eq) + Math.abs(r - er) + Math.abs(-q - r + eq + er);
-      if (distance <= radius) {
-        density++;
-      }
-    }
-  }
-  
-  return density;
-}
-
-// Missing Helper Functions for Enhanced AI
-
-function evaluateImmediateThreats(q, r, player, boardState = null) {
-  if (!boardState) boardState = game;
-  
-  let threatScore = 0;
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  const creature = getCreatureAtForBoard(tempBoard, q, r);
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  if (creature.size > 1) {
-    for (const piece of creature.pieces) {
-      for (const neighbor of getNeighbors(piece.q, piece.r)) {
-        if (tempBoard.board.has(neighbor.key) && 
-            tempBoard.board.get(neighbor.key).player === opponent) {
-          const enemyCreature = getCreatureAtForBoard(tempBoard, neighbor.q, neighbor.r);
-          if (enemyCreature.size === creature.size - 1) {
-            threatScore += enemyCreature.size; // More points for larger threats
-          }
-        }
-      }
-    }
-  }
-  
-  return threatScore;
-}
-
-function countAdjacentOpponentPieces(boardState, q, r, opponent) {
-  let count = 0;
-  for (const neighbor of getNeighbors(q, r)) {
-    if (boardState.board.has(neighbor.key) && 
-        boardState.board.get(neighbor.key).player === opponent) {
-      count++;
-    }
-  }
-  return count;
-}
-
-function countAdjacentFriendlyPieces(boardState, q, r, player) {
-  let count = 0;
-  for (const neighbor of getNeighbors(q, r)) {
-    if (boardState.board.has(neighbor.key) && 
-        boardState.board.get(neighbor.key).player === player) {
-      count++;
-    }
-  }
-  return count;
-}
-
-function evaluatePieceSafety(boardState, player) {
-  let safetyScore = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  for (const [key, cell] of boardState.board) {
-    if (cell.player === player) {
-      const [q, r] = key.split(',').map(Number);
-      const creature = getCreatureAtForBoard(boardState, q, r);
-      
-      if (creature.size >= 3) {
-        // Check vulnerability to eating
-        const threats = countAdjacentOpponentPieces(boardState, q, r, opponent);
-        safetyScore += Math.max(0, 10 - threats * 2);
-        
-        // Check vulnerability to swarming for size-4 creatures
-        if (creature.size === 4) {
-          const swarmThreat = countSwarmThreat(boardState, creature, opponent);
-          safetyScore -= swarmThreat * 5;
-        }
-      }
-    }
-  }
-  
-  return safetyScore;
-}
-
-function evaluateThreatDynamics(boardState, q, r, player) {
-  let dynamicsScore = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Immediate threats created
-  const immediateThreats = evaluateImmediateThreats(q, r, player, boardState);
-  dynamicsScore += immediateThreats * 15;
-  
-  // Threats blocked
-  const blockedThreats = countBlockedThreats(boardState, q, r, player, opponent);
-  dynamicsScore += blockedThreats * 20;
-  
-  // Future threat potential
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  const nextTurnThreats = countPotentialEating(tempBoard, q, r, player);
-  dynamicsScore += nextTurnThreats * 8;
-  
-  return dynamicsScore;
-}
-
-function evaluateKeyPieceSafety(boardState, player) {
-  let keyPieceSafety = 0;
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Find and evaluate safety of largest creatures (key pieces)
-  const creaturesBySize = new Map();
-  
-  for (const [key, cell] of boardState.board) {
-    if (cell.player === player) {
-      const [q, r] = key.split(',').map(Number);
-      const creature = getCreatureAtForBoard(boardState, q, r);
-      
-      if (creature.size >= 3) {
-        if (!creaturesBySize.has(creature.size)) {
-          creaturesBySize.set(creature.size, []);
-        }
-        creaturesBySize.get(creature.size).push(creature);
-      }
-    }
-  }
-  
-  // Evaluate safety of each key piece
-  for (const [size, creatures] of creaturesBySize) {
-    for (const creature of creatures) {
-      const threats = countSurroundingEnemies(boardState, creature);
-      const safety = Math.max(0, size * 5 - threats * 3);
-      keyPieceSafety += safety;
-    }
-  }
-  
-  return keyPieceSafety;
-}
-
-function evaluateAdvancedForks(boardState, q, r, player) {
-  let forkValue = 0;
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  const creature = getCreatureAtForBoard(tempBoard, q, r);
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  if (creature.size > 1) {
-    const threatenedCreatures = new Map(); // creature signature -> threat count
-    
-    for (const piece of creature.pieces) {
-      for (const neighbor of getNeighbors(piece.q, piece.r)) {
-        if (tempBoard.board.has(neighbor.key) && 
-            tempBoard.board.get(neighbor.key).player === opponent) {
-          const enemyCreature = getCreatureAtForBoard(tempBoard, neighbor.q, neighbor.r);
-          if (enemyCreature.size === creature.size - 1) {
-            const sig = getCreatureSignature(enemyCreature);
-            threatenedCreatures.set(sig, (threatenedCreatures.get(sig) || 0) + 1);
-          }
-        }
-      }
-    }
-    
-    // Advanced fork evaluation - multiple threats with different values
-    if (threatenedCreatures.size >= 2) {
-      let totalThreatValue = 0;
-      for (const [sig, threatCount] of threatenedCreatures) {
-        // Parse creature size from signature area for scoring
-        totalThreatValue += threatCount * 10;
-      }
-      forkValue = totalThreatValue * threatenedCreatures.size;
-    }
-  }
-  
-  return forkValue;
-}
-
-function evaluateBreakthroughSequences(boardState, q, r, player) {
-  let breakthroughValue = 0;
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  
-  // Look for sequences that penetrate deeply into enemy territory
-  const enemyDensity = countEnemyDensity(tempBoard, q, r, opponent);
-  
-  if (enemyDensity >= 2) {
-    // Check if this creates a wedge in enemy formation
-    const friendlySupport = countAdjacentFriendlyPieces(tempBoard, q, r, player);
-    const enemyResistance = countAdjacentOpponentPieces(tempBoard, q, r, opponent);
-    
-    if (friendlySupport >= 2 && enemyResistance >= 2) {
-      breakthroughValue += 25; // Supported breakthrough
-    }
-    
-    // Check for follow-up opportunities
-    const validMoves = getValidMovesForBoard(tempBoard, player);
-    let followUpThreats = 0;
-    
-    for (const move of validMoves.slice(0, 5)) { // Check top 5 moves
-      const distance = Math.abs(q - move.q) + Math.abs(r - move.r) + Math.abs(-q - r + move.q + move.r);
-      if (distance <= 2) { // Within breakthrough range
-        const followUpBoard = simulateMoveOnBoard(tempBoard, move.q, move.r, player);
-        const threats = evaluateImmediateThreats(move.q, move.r, player, followUpBoard);
-        followUpThreats += threats;
-      }
-    }
-    
-    breakthroughValue += Math.min(followUpThreats * 3, 30); // Cap follow-up bonus
-  }
-  
-  return breakthroughValue;
-}
-
-function isNearEdge(q, r) {
-  // Check if position is within 1 hex of the board edge
-  const maxCoord = 2; // Based on the hexagonal board size
-  return Math.abs(q) >= maxCoord || Math.abs(r) >= maxCoord || Math.abs(-q - r) >= maxCoord;
+  return distance >= BOARD_RADIUS * 2 - 1;
 }
 
 // Coordinate conversion functions
