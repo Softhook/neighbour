@@ -375,24 +375,6 @@ function drawUI() {
   noStroke();
   text(game.statusMessage, width / 2, height - 40);
   
-  // Show optimization status for Expert+ difficulties in AI vs Human games
-  if ((game.gameMode === MODE_VS_AI_HUMAN_BLACK || game.gameMode === MODE_VS_AI_HUMAN_WHITE) && 
-      game.aiDifficulty >= AI_DIFFICULTY_EXPERT) {
-    textSize(14);
-    fill(40, 80, 70); // Green color
-    const optimizationText = `Optimized AI (Depth ${game.aiDifficulty === AI_DIFFICULTY_EXPERT ? 5 : 
-                                                      game.aiDifficulty === AI_DIFFICULTY_MASTER ? 6 :
-                                                      game.aiDifficulty === AI_DIFFICULTY_GRANDMASTER ? 7 : 8})`;
-    text(optimizationText, width / 2, height - 15);
-    
-    // Show cache sizes if performance stats are available
-    if (transpositionTable.size > 0 || evaluationCache.size > 0) {
-      textSize(12);
-      fill(0, 0, 50);
-      text(`TT: ${transpositionTable.size} | EC: ${evaluationCache.size} | CC: ${creatureCache.size}`, 
-           width / 2, height - 1);
-    }
-  }
 }
 
 function drawGameOverScreen() {
