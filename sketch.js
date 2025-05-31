@@ -61,7 +61,6 @@ let historyHeuristic = {
   [PLAYER_WHITE]: new Map()
 };
 let killerMoves = [];
-let symmetryMap = new Map();
 
 // Cache management
 const MAX_CACHE_SIZE = 1000000;
@@ -73,6 +72,7 @@ let performanceStats = {
   cacheMisses: 0,
   evaluationCalls: 0,
   transpositionHits: 0,
+  historyHits: 0,
   killerMoveHits: 0,
   searchDepth: 0,
   moveTime: 0,
@@ -604,40 +604,32 @@ function processEatingAndSwarming(placedQ, placedR) {
 }
 
 function getCreatureAt(startQ, startR, hypotheticalPiece = null) {
+  // Breadth-first search with safety limit
   const board = hypotheticalPiece ? 
-    new Map([...game.board, [`${hypotheticalPiece.q},${hypotheticalPiece.r}`, hypotheticalPiece]]) :
-    game.board;
-  
+    new Map([...game.board, [`${hypotheticalPiece.q},${hypotheticalPiece.r}`, hypotheticalPiece]]) : game.board;
   const startKey = `${startQ},${startR}`;
   if (!board.has(startKey) || board.get(startKey).player === EMPTY) {
     return { pieces: [], size: 0, player: EMPTY };
   }
-  
   const targetPlayer = board.get(startKey).player;
   const visited = new Set();
   const queue = [{ q: startQ, r: startR }];
   const pieces = [];
   let iterations = 0;
-  const maxIterations = 1000; // Safety limit
-  
+  const maxIterations = 1000;
   while (queue.length > 0 && iterations < maxIterations) {
     const current = queue.shift();
     const key = `${current.q},${current.r}`;
-    
     if (visited.has(key)) continue;
     visited.add(key);
     pieces.push(current);
-    
     for (const neighbor of getNeighbors(current.q, current.r)) {
-      if (!visited.has(neighbor.key) && 
-          board.has(neighbor.key) && 
-          board.get(neighbor.key).player === targetPlayer) {
+      if (!visited.has(neighbor.key) && board.has(neighbor.key) && board.get(neighbor.key).player === targetPlayer) {
         queue.push({ q: neighbor.q, r: neighbor.r });
       }
     }
     iterations++;
   }
-  
   return { pieces, size: pieces.length, player: targetPlayer };
 }
 
@@ -691,7 +683,7 @@ function getValidMovesForBoard(boardState, player) {
   const moves = [];
   for (const hex of game.validHexes) {
     if (boardState.board.get(`${hex.q},${hex.r}`).player === EMPTY) {
-      const creature = getCreatureAtForBoardOriginal(boardState, hex.q, hex.r, { q: hex.q, r: hex.r, player });
+      const creature = getCreatureAtForBoardCached(boardState, hex.q, hex.r, { q: hex.q, r: hex.r, player });
       if (creature.size <= MAX_CREATURE_SIZE) {
         moves.push({ q: hex.q, r: hex.r });
       }
@@ -754,7 +746,7 @@ function evaluateMove(q, r, player) {
     score += tempBoard.scores[player] * 8;
     score -= tempBoard.scores[opponent] * 6;
     
-    const placedCreature = getCreatureAtForBoardOriginal(tempBoard, q, r);
+    const placedCreature = getCreatureAtForBoardCached(tempBoard, q, r);
     if (placedCreature.size === 2) score += 15;
     else if (placedCreature.size === 3) score += 25;
     
@@ -767,7 +759,7 @@ function evaluateMove(q, r, player) {
   }
   
   if (game.aiDifficulty >= AI_DIFFICULTY_EXPERT) {
-    return evaluateAdvancedAIOriginal(tempBoard, q, r, player, score);
+    return evaluateAdvancedAICached(tempBoard, q, r, player, score);
   }
   
   return evaluateHardAI(tempBoard, q, r, player, score);
@@ -789,7 +781,7 @@ function evaluateMoveFast(boardState, q, r, player) {
     score += 300;
   }
   
-  const creature = getCreatureAtForBoardOriginal(tempBoard, q, r);
+  const creature = getCreatureAtForBoardCached(tempBoard, q, r);
   switch(creature.size) {
     case 1: score += 2; break;
     case 2: score += 15; break;
@@ -814,7 +806,7 @@ function evaluateMoveFast(boardState, q, r, player) {
 function evaluateImmediateThreats(q, r, player, boardState = game) {
   let threatScore = 0;
   const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
-  const creature = getCreatureAtForBoardOriginal(tempBoard, q, r);
+  const creature = getCreatureAtForBoardCached(tempBoard, q, r);
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
 
   for (const dir of HEX_DIRECTIONS) {
@@ -823,8 +815,15 @@ function evaluateImmediateThreats(q, r, player, boardState = game) {
     const nKey = `${nq},${nr}`;
     
     if (tempBoard.board.has(nKey) && tempBoard.board.get(nKey).player === opponent) {
-      const sizeDiff = Math.abs(creature.size - 1);
-      if (sizeDiff === 1) threatScore += 15;
+      const neighborCreature = getCreatureAtForBoardCached(tempBoard, nq, nr);
+      // Check if neighbor can eat our creature (neighbor size = our size + 1)
+      if (neighborCreature.size === creature.size + 1) {
+        threatScore += 25; // High threat - can be eaten
+      }
+      // Check if we can eat neighbor (our size = neighbor size + 1)  
+      else if (creature.size === neighborCreature.size + 1) {
+        threatScore += 15; // Opportunity to eat
+      }
     }
   }
 
@@ -833,7 +832,7 @@ function evaluateImmediateThreats(q, r, player, boardState = game) {
 
 // Support functions for board simulation
 function processEatingAndSwarmingForBoard(boardState, placedQ, placedR, currentPlayer) {
-  const placedCreature = getCreatureAtForBoardOriginal(boardState, placedQ, placedR);
+  const placedCreature = getCreatureAtForBoardCached(boardState, placedQ, placedR);
   const opponent = currentPlayer === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
   const creaturesEaten = new Set();
   
@@ -841,7 +840,7 @@ function processEatingAndSwarmingForBoard(boardState, placedQ, placedR, currentP
     for (const piece of placedCreature.pieces) {
       for (const neighbor of getNeighbors(piece.q, piece.r)) {
         if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === opponent) {
-          const opponentCreature = getCreatureAtForBoardOriginal(boardState, neighbor.q, neighbor.r);
+          const opponentCreature = getCreatureAtForBoardCached(boardState, neighbor.q, neighbor.r);
           if (opponentCreature.size === placedCreature.size - 1) {
             creaturesEaten.add(getCreatureSignature(opponentCreature));
           }
@@ -853,7 +852,7 @@ function processEatingAndSwarmingForBoard(boardState, placedQ, placedR, currentP
   if (placedCreature.size === 1) {
     for (const neighbor of getNeighbors(placedQ, placedR)) {
       if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === opponent) {
-        const targetCreature = getCreatureAtForBoardOriginal(boardState, neighbor.q, neighbor.r);
+        const targetCreature = getCreatureAtForBoardCached(boardState, neighbor.q, neighbor.r);
         if (targetCreature.size === MAX_CREATURE_SIZE) {
           const swarmCount = countSwarmingCreaturesForBoard(boardState, targetCreature, currentPlayer, placedQ, placedR);
           if (swarmCount >= 2) {
@@ -878,32 +877,13 @@ function processEatingAndSwarmingForBoard(boardState, placedQ, placedR, currentP
   return totalEaten;
 }
 
-function countSwarmingCreaturesForBoard(boardState, targetCreature, friendlyPlayer, excludeQ, excludeR) {
-  const swarmers = new Set();
-  
-  for (const piece of targetCreature.pieces) {
-    for (const neighbor of getNeighbors(piece.q, piece.r)) {
-      if (neighbor.q === excludeQ && neighbor.r === excludeR) continue;
-      
-      if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === friendlyPlayer) {
-        const creature = getCreatureAtForBoardOriginal(boardState, neighbor.q, neighbor.r);
-        if (creature.size === 1) {
-          swarmers.add(neighbor.key);
-        }
-      }
-    }
-  }
-  
-  return swarmers.size;
-}
-
 function getCreatureFromSignatureForBoard(boardState, signature) {
   const [coords, playerStr] = signature.split('_');
   const [q, r] = coords.split(',').map(Number);
   const player = parseInt(playerStr);
   
   if (boardState.board.has(`${q},${r}`) && boardState.board.get(`${q},${r}`).player === player) {
-    return getCreatureAtForBoardOriginal(boardState, q, r);
+    return getCreatureAtForBoardCached(boardState, q, r);
   }
   return null;
 }
@@ -930,6 +910,25 @@ function countAdjacentFriendlyPieces(boardState, q, r, player) {
   return count;
 }
 
+function countSwarmingCreaturesForBoard(boardState, targetCreature, friendlyPlayer, excludeQ, excludeR) {
+  const swarmers = new Set();
+  
+  for (const piece of targetCreature.pieces) {
+    for (const neighbor of getNeighbors(piece.q, piece.r)) {
+      if (neighbor.q === excludeQ && neighbor.r === excludeR) continue;
+      
+      if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === friendlyPlayer) {
+        const creature = getCreatureAtForBoardCached(boardState, neighbor.q, neighbor.r);
+        if (creature.size === 1) {
+          swarmers.add(neighbor.key);
+        }
+      }
+    }
+  }
+  
+  return swarmers.size;
+}
+
 // AI Evaluation Functions
 function evaluateHardAI(tempBoard, q, r, player, baseScore) {
   let score = baseScore;
@@ -938,7 +937,7 @@ function evaluateHardAI(tempBoard, q, r, player, baseScore) {
   score += tempBoard.scores[player] * 10;
   score -= tempBoard.scores[opponent] * 8;
   
-  const placedCreature = getCreatureAtForBoardOriginal(tempBoard, q, r);
+  const placedCreature = getCreatureAtForBoardCached(tempBoard, q, r);
   
   if (placedCreature.size === 2) score += 20;
   else if (placedCreature.size === 3) score += 35;
@@ -961,7 +960,7 @@ function evaluateHardAI(tempBoard, q, r, player, baseScore) {
 }
 
 function countPotentialEating(boardState, q, r, player) {
-  const creature = getCreatureAtForBoardOriginal(boardState, q, r);
+  const creature = getCreatureAtForBoardCached(boardState, q, r);
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
   let eatingOpportunities = 0;
   
@@ -969,7 +968,7 @@ function countPotentialEating(boardState, q, r, player) {
     for (const neighbor of getNeighbors(piece.q, piece.r)) {
       if (boardState.board.has(neighbor.key) && 
           boardState.board.get(neighbor.key).player === opponent) {
-        const opponentCreature = getCreatureAtForBoardOriginal(boardState, neighbor.q, neighbor.r);
+        const opponentCreature = getCreatureAtForBoardCached(boardState, neighbor.q, neighbor.r);
         if (opponentCreature.size === creature.size - 1) {
           eatingOpportunities++;
         }
@@ -987,7 +986,7 @@ function countSwarmThreat(boardState, creature, opponent) {
     for (const neighbor of getNeighbors(piece.q, piece.r)) {
       if (boardState.board.has(neighbor.key) && 
           boardState.board.get(neighbor.key).player === opponent) {
-        const enemyCreature = getCreatureAtForBoardOriginal(boardState, neighbor.q, neighbor.r);
+        const enemyCreature = getCreatureAtForBoardCached(boardState, neighbor.q, neighbor.r);
         if (enemyCreature.size === 1) {
           swarmers++;
         }
@@ -1030,6 +1029,7 @@ function initializeOptimizationCaches() {
     cacheMisses: 0,
     evaluationCalls: 0,
     transpositionHits: 0,
+    historyHits: 0,
     killerMoveHits: 0,
     searchDepth: 0,
     moveTime: 0,
@@ -1039,17 +1039,17 @@ function initializeOptimizationCaches() {
 
 function cleanupCaches() {
   // Clean up caches when they get too large
-  if (transpositionTable.size > MAX_CACHE_SIZE) {
+  if (transpositionTable.size > MAX_CACHE_SIZE * CACHE_CLEANUP_THRESHOLD) {
     const keysToDelete = [...transpositionTable.keys()].slice(0, Math.floor(transpositionTable.size * 0.3));
     keysToDelete.forEach(key => transpositionTable.delete(key));
   }
   
-  if (evaluationCache.size > MAX_CACHE_SIZE) {
+  if (evaluationCache.size > MAX_CACHE_SIZE * CACHE_CLEANUP_THRESHOLD) {
     const keysToDelete = [...evaluationCache.keys()].slice(0, Math.floor(evaluationCache.size * 0.3));
     keysToDelete.forEach(key => evaluationCache.delete(key));
   }
   
-  if (creatureCache.size > MAX_CACHE_SIZE) {
+  if (creatureCache.size > MAX_CACHE_SIZE * CACHE_CLEANUP_THRESHOLD) {
     const keysToDelete = [...creatureCache.keys()].slice(0, Math.floor(creatureCache.size * 0.3));
     keysToDelete.forEach(key => creatureCache.delete(key));
   }
@@ -1059,6 +1059,8 @@ function updateHistoryHeuristic(player, move, depth) {
   const key = `${move.q},${move.r}`;
   const current = historyHeuristic[player].get(key) || 0;
   historyHeuristic[player].set(key, current + depth * depth);
+  // Record history heuristic usage
+  performanceStats.historyHits++;
 }
 
 function updateKillerMoves(move, depth) {
@@ -1078,6 +1080,7 @@ function logPerformanceStats() {
     console.log(`Nodes evaluated: ${performanceStats.nodesEvaluated}`);
     console.log(`Cache hit rate: ${cacheHitRate}%`);
     console.log(`Transposition hits: ${performanceStats.transpositionHits}`);
+    console.log(`History heuristic hits: ${performanceStats.historyHits}`);
     console.log(`Killer move hits: ${performanceStats.killerMoveHits}`);
     console.log(`Transposition table size: ${transpositionTable.size}`);
     console.log(`Evaluation cache size: ${evaluationCache.size}`);
@@ -1279,8 +1282,8 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
   let bestMove = null;
   let bestScore = -Infinity;
   
-  // Enhanced move ordering with multiple evaluation criteria
-  const sortedMoves = validMoves.map(move => {
+  // Enhanced move ordering with pre-computed board states
+  const moveData = validMoves.map(move => {
     const tempBoard = simulateMove(move.q, move.r, aiPlayer);
     const moveScore = evaluateMoveFast(tempBoard, move.q, move.r, aiPlayer);
     const captureScore = (tempBoard.scores[aiPlayer] - game.scores[aiPlayer]) * 1000;
@@ -1289,9 +1292,10 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
     
     return {
       move,
+      tempBoard, // Store pre-computed board for reuse
       score: captureScore + threatScore + moveScore + historyScore
     };
-  }).sort((a, b) => b.score - a.score).map(item => item.move);
+  }).sort((a, b) => b.score - a.score);
   
   // Iterative deepening for better move ordering and time management
   let currentDepth = 1;
@@ -1302,13 +1306,13 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
     let currentBestScore = -Infinity;
     
     // Sort moves based on previous iteration scores
-    const orderedMoves = currentDepth === 1 ? sortedMoves : 
-      [...sortedMoves].sort((a, b) => (moveScores.get(`${b.q},${b.r}`) || -Infinity) - (moveScores.get(`${a.q},${a.r}`) || -Infinity));
+    const orderedMoveData = currentDepth === 1 ? moveData : 
+      [...moveData].sort((a, b) => (moveScores.get(`${b.move.q},${b.move.r}`) || -Infinity) - (moveScores.get(`${a.move.q},${a.move.r}`) || -Infinity));
     
-    for (const move of orderedMoves) {
+    for (const {move, tempBoard} of orderedMoveData) {
       if (Date.now() - startTime > maxThinkingTime * 0.9) break;
       
-      const tempBoard = simulateMove(move.q, move.r, aiPlayer);
+      // Use pre-computed board state instead of simulating again
       const score = minimaxOptimized(tempBoard, currentDepth - 1, -Infinity, Infinity, false, aiPlayer, humanPlayer, startTime, maxThinkingTime);
       
       moveScores.set(`${move.q},${move.r}`, score);
@@ -1338,13 +1342,10 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
 // Enhanced minimax with transposition table and move ordering
 function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer, humanPlayer, startTime, maxThinkingTime) {
   performanceStats.nodesEvaluated++;
-  
   // Check time limit
   if (Date.now() - startTime > maxThinkingTime) {
-    return isMaximizing ? -1000 : 1000; // Return neutral bound instead of potentially incorrect alpha/beta
+    return isMaximizing ? -1000 : 1000;
   }
-  
-  // Generate board hash for transposition table lookup
   const boardHash = getBoardHash(boardState);
   
   // Transposition table lookup
@@ -1394,36 +1395,38 @@ function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer
     return score;
   }
   
-  // Enhanced move ordering with history heuristic and killer moves
-  const sortedMoves = moves.map(move => ({
-    move,
-    score: evaluateMoveFast(boardState, move.q, move.r, currentPlayer) + getMoveScore(move, currentPlayer, depth)
-  })).sort((a, b) => isMaximizing ? b.score - a.score : a.score - b.score).map(item => item.move);
-  
+  // Enhanced move ordering with single simulation per move
+  const moveData = moves.map(move => {
+    const tmpBoard = simulateMoveOnBoard(boardState, move.q, move.r, currentPlayer);
+    // Combine fast evaluation and history heuristic
+    const score = evaluateMoveFast(boardState, move.q, move.r, currentPlayer) + getMoveScore(move, currentPlayer, depth);
+    return { move, tmpBoard, score };
+  });
+  moveData.sort((a, b) => isMaximizing ? b.score - a.score : a.score - b.score);
+
   let bestScore = isMaximizing ? -Infinity : Infinity;
   let bestMove = null;
-  let flag = TT_UPPERBOUND; // Default: all moves failed high
-  
-  for (let i = 0; i < sortedMoves.length; i++) {
-    const move = sortedMoves[i];
-    
+  let flag = isMaximizing ? TT_UPPERBOUND : TT_LOWERBOUND;
+
+  for (let i = 0; i < moveData.length; i++) {
+    const { move, tmpBoard } = moveData[i];
     if (Date.now() - startTime > maxThinkingTime) break;
-    
-    const newBoard = simulateMoveOnBoard(boardState, move.q, move.r, currentPlayer);
+    // Use precomputed board
+    const newBoard = tmpBoard;
     const eval = minimaxOptimized(newBoard, depth - 1, alpha, beta, !isMaximizing, aiPlayer, humanPlayer, startTime, maxThinkingTime);
-    
+
     if (isMaximizing) {
       if (eval > bestScore) {
         bestScore = eval;
         bestMove = move;
       }
       alpha = Math.max(alpha, eval);
-      
-      if (beta <= alpha) {
-        // Beta cutoff - update history heuristic and killer moves
+      if (alpha >= beta) {
+        // Alpha cutoff - record stats, update heuristics and killer moves
+        performanceStats.killerMoveHits++;
         updateHistoryHeuristic(currentPlayer, move, depth);
         updateKillerMoves(move, depth);
-        flag = TT_LOWERBOUND; // Move failed high
+        flag = TT_UPPERBOUND; // Move failed low
         break;
       }
     } else {
@@ -1432,20 +1435,24 @@ function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer
         bestMove = move;
       }
       beta = Math.min(beta, eval);
-      
       if (beta <= alpha) {
-        // Alpha cutoff - update history heuristic and killer moves
+        // Beta cutoff - record stats, update heuristics and killer moves
+        performanceStats.killerMoveHits++;
         updateHistoryHeuristic(currentPlayer, move, depth);
         updateKillerMoves(move, depth);
         flag = TT_LOWERBOUND; // Move failed high
         break;
       }
     }
-    
-    // If this is the first move or we found a new best move
-    if (i === 0 || (isMaximizing && eval > alpha) || (!isMaximizing && eval < beta)) {
-      flag = TT_EXACT; // We have an exact score
-    }
+  }
+  
+  // Determine the correct transposition table flag
+  if (bestScore <= alpha) {
+    flag = TT_UPPERBOUND; // Fail-low
+  } else if (bestScore >= beta) {
+    flag = TT_LOWERBOUND; // Fail-high  
+  } else {
+    flag = TT_EXACT; // Exact score within window
   }
   
   // Store result in transposition table
@@ -1457,7 +1464,7 @@ function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer
   });
   
   // Clean up cache if needed
-  if (transpositionTable.size > MAX_CACHE_SIZE) {
+  if (transpositionTable.size > MAX_CACHE_SIZE * CACHE_CLEANUP_THRESHOLD) {
     cleanupCaches();
   }
   
@@ -1473,9 +1480,8 @@ function getCachedEvaluation(boardHash, funcName, ...params) {
 function setCachedEvaluation(boardHash, funcName, result, ...params) {
   const cacheKey = `${funcName}|${boardHash}|${params.join('|')}`;
   evaluationCache.set(cacheKey, result);
-  
-  // Clean up cache if it gets too large
-  if (evaluationCache.size > MAX_CACHE_SIZE) {
+  // Clean up cache when size exceeds threshold
+  if (evaluationCache.size > MAX_CACHE_SIZE * CACHE_CLEANUP_THRESHOLD) {
     cleanupCaches();
   }
 }
@@ -1498,9 +1504,11 @@ function evaluateAdvancedAICached(tempBoard, q, r, player, baseScore) {
   const boardHash = getBoardHash(tempBoard);
   const cached = getCachedEvaluation(boardHash, 'evaluateAdvancedAI', q, r, player, baseScore);
   if (cached !== undefined) {
+    performanceStats.cacheHits++;
     return cached;
   }
   
+  performanceStats.cacheMisses++;
   const result = evaluateAdvancedAIOriginal(tempBoard, q, r, player, baseScore);
   setCachedEvaluation(boardHash, 'evaluateAdvancedAI', result, q, r, player, baseScore);
   return result;
@@ -1509,32 +1517,61 @@ function evaluateAdvancedAICached(tempBoard, q, r, player, baseScore) {
 function getCreatureAtForBoardCached(boardState, q, r, overrideHex = null) {
   const boardHash = getBoardHash(boardState);
   const cacheKey = `${boardHash}|${q}|${r}${overrideHex ? `|${overrideHex.q}|${overrideHex.r}|${overrideHex.player}` : ''}`;
-  
   const cached = creatureCache.get(cacheKey);
   if (cached !== undefined) {
+    performanceStats.cacheHits++;
     return cached;
   }
   
+  performanceStats.cacheMisses++;
   const result = getCreatureAtForBoardOriginal(boardState, q, r, overrideHex);
   creatureCache.set(cacheKey, result);
-  
-  // Clean up cache if it gets too large
-  if (creatureCache.size > MAX_CACHE_SIZE) {
+  // Clean up cache when size exceeds threshold
+  if (creatureCache.size > MAX_CACHE_SIZE * CACHE_CLEANUP_THRESHOLD) {
     cleanupCaches();
   }
-  
   return result;
 }
 
 function evaluateBoardPositionCached(boardState, player) {
   const boardHash = getBoardHash(boardState);
-  let cached = getCachedEvaluation(boardHash, 'evaluateBoardPosition', player);
+  const cached = getCachedEvaluation(boardHash, 'evaluateBoardPosition', player);
   if (cached !== undefined) {
+    performanceStats.cacheHits++;
     return cached;
   }
   
+  performanceStats.cacheMisses++;
   const result = evaluateBoardPositionOriginal(boardState, player);
   setCachedEvaluation(boardHash, 'evaluateBoardPosition', result, player);
+  return result;
+}
+
+function evaluateTerritoryControlCached(boardState, player) {
+  const boardHash = getBoardHash(boardState);
+  const cached = getCachedEvaluation(boardHash, 'evaluateTerritoryControl', player);
+  if (cached !== undefined) {
+    performanceStats.cacheHits++;
+    return cached;
+  }
+  
+  performanceStats.cacheMisses++;
+  const result = evaluateTerritoryControl(boardState, player);
+  setCachedEvaluation(boardHash, 'evaluateTerritoryControl', result, player);
+  return result;
+}
+
+function evaluateConnectivityCached(boardState, player) {
+  const boardHash = getBoardHash(boardState);
+  const cached = getCachedEvaluation(boardHash, 'evaluateConnectivity', player);
+  if (cached !== undefined) {
+    performanceStats.cacheHits++;
+    return cached;
+  }
+  
+  performanceStats.cacheMisses++;
+  const result = evaluateConnectivity(boardState, player);
+  setCachedEvaluation(boardHash, 'evaluateConnectivity', result, player);
   return result;
 }
 
@@ -1551,8 +1588,8 @@ function evaluateBoardStateOriginal(boardState, aiPlayer, humanPlayer) {
   let evaluation = (aiScore - humanScore) * 50;
   
   // Position evaluation
-  evaluation += evaluateBoardPositionOriginal(boardState, aiPlayer);
-  evaluation -= evaluateBoardPositionOriginal(boardState, humanPlayer);
+  evaluation += evaluateBoardPositionCached(boardState, aiPlayer);
+  evaluation -= evaluateBoardPositionCached(boardState, humanPlayer);
   
   return evaluation;
 }
@@ -1560,15 +1597,15 @@ function evaluateBoardStateOriginal(boardState, aiPlayer, humanPlayer) {
 function evaluateAdvancedAIOriginal(tempBoard, q, r, player, baseScore) {
   let score = baseScore;
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
-  const placedCreature = getCreatureAtForBoardOriginal(tempBoard, q, r);
+  const placedCreature = getCreatureAtForBoardCached(tempBoard, q, r);
   
   // Territory control
-  const territoryScore = evaluateTerritoryControl(tempBoard, player);
-  const opponentTerritory = evaluateTerritoryControl(tempBoard, opponent);
+  const territoryScore = evaluateTerritoryControlCached(tempBoard, player);
+  const opponentTerritory = evaluateTerritoryControlCached(tempBoard, opponent);
   score += (territoryScore - opponentTerritory) * 20;
   
   // Connectivity
-  const connectivityScore = evaluateConnectivity(tempBoard, player);
+  const connectivityScore = evaluateConnectivityCached(tempBoard, player);
   score += connectivityScore * 12;
   
   // Creature placement value
@@ -1599,40 +1636,31 @@ function evaluateAdvancedAIOriginal(tempBoard, q, r, player, baseScore) {
 }
 
 function getCreatureAtForBoardOriginal(boardState, startQ, startR, hypotheticalPiece = null) {
-  const board = hypotheticalPiece ? 
-    new Map([...boardState.board, [`${hypotheticalPiece.q},${hypotheticalPiece.r}`, hypotheticalPiece]]) :
-    boardState.board;
-  
+  // BFS with safety limit
+  const board = hypotheticalPiece ? new Map([...boardState.board, [`${hypotheticalPiece.q},${hypotheticalPiece.r}`, hypotheticalPiece]]) : boardState.board;
   const startKey = `${startQ},${startR}`;
   if (!board.has(startKey) || board.get(startKey).player === EMPTY) {
     return { pieces: [], size: 0, player: EMPTY };
   }
-  
   const targetPlayer = board.get(startKey).player;
   const visited = new Set();
   const queue = [{ q: startQ, r: startR }];
   const pieces = [];
   let iterations = 0;
-  const maxIterations = 1000; // Safety limit
-  
+  const maxIterations = 1000;
   while (queue.length > 0 && iterations < maxIterations) {
     const current = queue.shift();
     const key = `${current.q},${current.r}`;
-    
     if (visited.has(key)) continue;
     visited.add(key);
     pieces.push(current);
-    
     for (const neighbor of getNeighbors(current.q, current.r)) {
-      if (!visited.has(neighbor.key) && 
-          board.has(neighbor.key) && 
-          board.get(neighbor.key).player === targetPlayer) {
+      if (!visited.has(neighbor.key) && board.has(neighbor.key) && board.get(neighbor.key).player === targetPlayer) {
         queue.push({ q: neighbor.q, r: neighbor.r });
       }
     }
     iterations++;
   }
-  
   return { pieces, size: pieces.length, player: targetPlayer };
 }
 
@@ -1645,7 +1673,7 @@ function evaluateBoardPositionOriginal(boardState, player) {
   for (const [key, cell] of boardState.board) {
     if (cell.player === player && !visitedHexes.has(key)) {
       const [q, r] = key.split(',').map(Number);
-      const creature = getCreatureAtForBoardOriginal(boardState, q, r);
+      const creature = getCreatureAtForBoardCached(boardState, q, r);
       
       // Mark all pieces of this creature as visited
       for (const piece of creature.pieces) {
@@ -1712,7 +1740,7 @@ function evaluateConnectivity(boardState, player) {
   for (const [key, cell] of boardState.board) {
     if (cell.player === player && !visited.has(key)) {
       const [q, r] = key.split(',').map(Number);
-      const creature = getCreatureAtForBoardOriginal(boardState, q, r);
+      const creature = getCreatureAtForBoardCached(boardState, q, r);
       
       for (const piece of creature.pieces) {
         visited.add(`${piece.q},${piece.r}`);
