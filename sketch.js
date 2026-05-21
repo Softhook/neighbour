@@ -662,7 +662,11 @@ function countSwarmingCreatures(targetCreature, friendlyPlayer, excludeQ, exclud
 }
 
 function getCreatureSignature(creature) {
-  return `${creature.pieces[0].q},${creature.pieces[0].r}_${creature.player}`;
+  const sortedCoords = creature.pieces
+    .map(piece => `${piece.q},${piece.r}`)
+    .sort()
+    .join('|');
+  return `${sortedCoords}_${creature.player}`;
 }
 
 // Core AI Support Functions (from try.js optimization)
@@ -736,6 +740,8 @@ function simulateMoveOnBoard(boardState, q, r, player) {
 function evaluateMove(q, r, player) {
   const tempBoard = simulateMove(q, r, player);
   let score = (tempBoard.scores[player] - game.scores[player]) * 100;
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  const placedCreature = getCreatureAtForBoardCached(tempBoard, q, r);
   
   if (game.aiDifficulty === AI_DIFFICULTY_EASY) {
     score += (Math.random() - 0.5) * 50;
@@ -743,13 +749,16 @@ function evaluateMove(q, r, player) {
   }
   
   if (game.aiDifficulty === AI_DIFFICULTY_MEDIUM) {
-    const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
     score += tempBoard.scores[player] * 8;
     score -= tempBoard.scores[opponent] * 6;
     
-    const placedCreature = getCreatureAtForBoardCached(tempBoard, q, r);
     if (placedCreature.size === 2) score += 15;
     else if (placedCreature.size === 3) score += 25;
+    else if (placedCreature.size === 4) {
+      score += 20;
+      const swarmThreat = countSwarmThreat(tempBoard, placedCreature, opponent);
+      score -= swarmThreat * 40;
+    }
     
     score += (Math.random() - 0.5) * 25;
     return score;
@@ -766,8 +775,7 @@ function evaluateMove(q, r, player) {
   return evaluateHardAI(tempBoard, q, r, player, score);
 }
 
-function evaluateMoveFast(boardState, q, r, player) {
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+function evaluateSimulatedMoveFast(boardState, tempBoard, q, r, player) {
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
   
   let score = 0;
@@ -790,13 +798,14 @@ function evaluateMoveFast(boardState, q, r, player) {
     case 4: 
       const threats = countAdjacentOpponentPieces(tempBoard, q, r, opponent);
       score += Math.max(5, 25 - threats * 8);
+      score -= countSwarmThreat(tempBoard, creature, opponent) * 40;
       break;
   }
   
   const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
   score += (6 - distanceFromCenter) * 3;
   
-  score += evaluateImmediateThreats(q, r, player, tempBoard) * 10;
+  score += evaluateImmediateThreats(q, r, player, boardState, tempBoard) * 10;
   
   const connections = countAdjacentFriendlyPieces(tempBoard, q, r, player);
   score += connections * 8;
@@ -804,11 +813,18 @@ function evaluateMoveFast(boardState, q, r, player) {
   return score;
 }
 
-function evaluateImmediateThreats(q, r, player, boardState = game) {
-  let threatScore = 0;
+function evaluateMoveFast(boardState, q, r, player) {
   const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+  return evaluateSimulatedMoveFast(boardState, tempBoard, q, r, player);
+}
+
+function evaluateImmediateThreats(q, r, player, boardState = game, simulatedBoardState = null) {
+  let threatScore = 0;
+  const tempBoard = simulatedBoardState || simulateMoveOnBoard(boardState, q, r, player);
   const creature = getCreatureAtForBoardCached(tempBoard, q, r);
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  const evaluatedThreats = new Set();
+  const evaluatedOpportunities = new Set();
 
   for (const dir of HEX_DIRECTIONS) {
     const nq = q + dir.q;
@@ -817,12 +833,15 @@ function evaluateImmediateThreats(q, r, player, boardState = game) {
     
     if (tempBoard.board.has(nKey) && tempBoard.board.get(nKey).player === opponent) {
       const neighborCreature = getCreatureAtForBoardCached(tempBoard, nq, nr);
+      const creatureSignature = getCreatureSignature(neighborCreature);
       // Check if neighbor can eat our creature (neighbor size = our size + 1)
-      if (neighborCreature.size === creature.size + 1) {
-        threatScore += 25; // High threat - can be eaten
+      if (neighborCreature.size === creature.size + 1 && !evaluatedThreats.has(creatureSignature)) {
+        evaluatedThreats.add(creatureSignature);
+        threatScore -= 25; // High threat - can be eaten
       }
       // Check if we can eat neighbor (our size = neighbor size + 1)  
-      else if (creature.size === neighborCreature.size + 1) {
+      else if (creature.size === neighborCreature.size + 1 && !evaluatedOpportunities.has(creatureSignature)) {
+        evaluatedOpportunities.add(creatureSignature);
         threatScore += 15; // Opportunity to eat
       }
     }
@@ -880,11 +899,15 @@ function processEatingAndSwarmingForBoard(boardState, placedQ, placedR, currentP
 
 function getCreatureFromSignatureForBoard(boardState, signature) {
   const [coords, playerStr] = signature.split('_');
-  const [q, r] = coords.split(',').map(Number);
+  const [firstCoord] = coords.split('|');
+  const [q, r] = firstCoord.split(',').map(Number);
   const player = parseInt(playerStr);
   
   if (boardState.board.has(`${q},${r}`) && boardState.board.get(`${q},${r}`).player === player) {
-    return getCreatureAtForBoardCached(boardState, q, r);
+    const creature = getCreatureAtForBoardCached(boardState, q, r);
+    if (creature && getCreatureSignature(creature) === signature) {
+      return creature;
+    }
   }
   return null;
 }
@@ -981,21 +1004,25 @@ function countPotentialEating(boardState, q, r, player) {
 }
 
 function countSwarmThreat(boardState, creature, opponent) {
-  let swarmers = 0;
+  const swarmers = new Set();
+  const checkedNeighbors = new Set();
   
   for (const piece of creature.pieces) {
     for (const neighbor of getNeighbors(piece.q, piece.r)) {
+      if (checkedNeighbors.has(neighbor.key)) continue;
+      checkedNeighbors.add(neighbor.key);
+
       if (boardState.board.has(neighbor.key) && 
           boardState.board.get(neighbor.key).player === opponent) {
         const enemyCreature = getCreatureAtForBoardCached(boardState, neighbor.q, neighbor.r);
         if (enemyCreature.size === 1) {
-          swarmers++;
+          swarmers.add(neighbor.key);
         }
       }
     }
   }
   
-  return Math.max(0, swarmers - 2); // Need 3 to swarm, so threat starts at 3
+  return Math.max(0, swarmers.size - 1); // Opponent places one additional size-1 to complete the swarm
 }
 
 // AI Optimization Functions
@@ -1313,13 +1340,18 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
   
   let bestMove = null;
   let bestScore = -Infinity;
+  const currentBoardState = {
+    board: game.board,
+    scores: game.scores,
+    piecesInHand: game.piecesInHand
+  };
   
   // Enhanced move ordering with pre-computed board states
   const moveData = validMoves.map(move => {
     const tempBoard = simulateMove(move.q, move.r, aiPlayer);
-    const moveScore = evaluateMoveFast(tempBoard, move.q, move.r, aiPlayer);
+    const moveScore = evaluateSimulatedMoveFast(currentBoardState, tempBoard, move.q, move.r, aiPlayer);
     const captureScore = (tempBoard.scores[aiPlayer] - game.scores[aiPlayer]) * 1000;
-    const threatScore = evaluateImmediateThreats(move.q, move.r, aiPlayer) * 100;
+    const threatScore = evaluateImmediateThreats(move.q, move.r, aiPlayer, currentBoardState, tempBoard) * 100;
     const historyScore = getMoveScore(move, aiPlayer, 0);
     
     return {
@@ -1374,6 +1406,8 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
 // Enhanced minimax with transposition table and move ordering
 function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer, humanPlayer, startTime, maxThinkingTime) {
   performanceStats.nodesEvaluated++;
+  const originalAlpha = alpha;
+  const originalBeta = beta;
   // Check time limit
   if (Date.now() - startTime > maxThinkingTime) {
     return isMaximizing ? -1000 : 1000;
@@ -1431,7 +1465,7 @@ function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer
   const moveData = moves.map(move => {
     const tmpBoard = simulateMoveOnBoard(boardState, move.q, move.r, currentPlayer);
     // Combine fast evaluation and history heuristic
-    const score = evaluateMoveFast(boardState, move.q, move.r, currentPlayer) + getMoveScore(move, currentPlayer, depth);
+    const score = evaluateSimulatedMoveFast(boardState, tmpBoard, move.q, move.r, currentPlayer) + getMoveScore(move, currentPlayer, depth);
     return { move, tmpBoard, score };
   });
   moveData.sort((a, b) => isMaximizing ? b.score - a.score : a.score - b.score);
@@ -1479,9 +1513,9 @@ function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer
   }
   
   // Determine the correct transposition table flag
-  if (bestScore <= alpha) {
+  if (bestScore <= originalAlpha) {
     flag = TT_UPPERBOUND; // Fail-low
-  } else if (bestScore >= beta) {
+  } else if (bestScore >= originalBeta) {
     flag = TT_LOWERBOUND; // Fail-high  
   } else {
     flag = TT_EXACT; // Exact score within window
@@ -1797,7 +1831,9 @@ function evaluateCreaturePlacement(boardState, creature, q, r) {
     case 3: placementScore += 45; break;
     case 4:
       const surroundingEnemies = countSurroundingEnemies(boardState, creature);
-      placementScore += 35 - (surroundingEnemies * 10);
+      const opponent = creature.player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+      const swarmThreat = countSwarmThreat(boardState, creature, opponent);
+      placementScore += 35 - (surroundingEnemies * 10) - (swarmThreat * 40);
       break;
   }
   
