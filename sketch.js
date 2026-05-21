@@ -54,7 +54,8 @@ let game = {
   statusMessage: "",
   aiThinking: false,
   aiMoveTimeoutId: null,
-  moveHistory: []
+  moveHistory: [],
+  legalMoveKeys: null
 };
 
 // AI Optimization Infrastructure
@@ -341,12 +342,6 @@ function drawDifficultyButton(button, label, isSelected) {
 }
 
 function drawBoard() {
-  const showLegalMoves = game.screen === SCREEN_GAME && !game.gameOver && !game.aiThinking &&
-    game.piecesInHand[game.currentPlayer] > 0 && !isCurrentTurnAI();
-  const legalMoveKeys = showLegalMoves
-    ? new Set(getValidMoves(game.currentPlayer).map(move => `${move.q},${move.r}`))
-    : null;
-  
   for (const hex of game.validHexes) {
     const pixel = axialToPixel(hex.q, hex.r);
     const hexKey = `${hex.q},${hex.r}`;
@@ -360,7 +355,7 @@ function drawBoard() {
     
     drawHex(pixel.x, pixel.y, hexSize, colors[cell.player]);
     
-    if (legalMoveKeys && cell.player === EMPTY && legalMoveKeys.has(hexKey)) {
+    if (game.legalMoveKeys && cell.player === EMPTY && game.legalMoveKeys.has(hexKey)) {
       noStroke();
       fill(210, 10, 35, 30);
       circle(pixel.x, pixel.y, hexSize * 0.25);
@@ -571,6 +566,14 @@ function isCurrentTurnAI() {
          (game.gameMode === MODE_VS_AI_HUMAN_WHITE && game.currentPlayer === PLAYER_BLACK);
 }
 
+function updateLegalMoveKeys() {
+  const showLegalMoves = game.screen === SCREEN_GAME && !game.gameOver && !game.aiThinking &&
+    game.piecesInHand[game.currentPlayer] > 0 && !isCurrentTurnAI();
+  game.legalMoveKeys = showLegalMoves
+    ? new Set(getValidMoves(game.currentPlayer).map(move => `${move.q},${move.r}`))
+    : null;
+}
+
 function createGameSnapshot() {
   const boardSnapshot = new Map();
   for (const [key, value] of game.board) {
@@ -586,7 +589,7 @@ function createGameSnapshot() {
     winner: game.winner,
     lastPlayerToMove: game.lastPlayerToMove,
     lastPlacedPiece: game.lastPlacedPiece ? { ...game.lastPlacedPiece } : null,
-    aiThinking: false
+    aiThinking: game.aiThinking
   };
 }
 
@@ -627,6 +630,7 @@ function undoMove() {
     }
   }
   
+  game.aiThinking = false;
   updateStatusMessage();
   return true;
 }
@@ -1312,9 +1316,13 @@ function endGame() {
   } else {
     game.winner = game.lastPlayerToMove; // Tie goes to last player to move
   }
+  
+  updateLegalMoveKeys();
 }
 
 function updateStatusMessage() {
+  updateLegalMoveKeys();
+  
   if (game.gameOver) return;
   
   // Check if AI is thinking
