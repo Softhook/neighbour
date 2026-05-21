@@ -355,10 +355,34 @@ function drawBoard() {
     
     drawHex(pixel.x, pixel.y, hexSize, colors[cell.player]);
     
-    if (game.legalMoveKeys && cell.player === EMPTY && game.legalMoveKeys.has(hexKey)) {
-      noStroke();
-      fill(210, 10, 35, 30);
-      circle(pixel.x, pixel.y, hexSize * 0.25);
+    if (game.legalMoveKeys && cell.player === EMPTY && !game.legalMoveKeys.has(hexKey)) {
+      // Draw red hashed lines on illegal (unreachable) empty hexes
+      drawingContext.save();
+
+      // Clip to the hex shape
+      drawingContext.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const angle = (Math.PI * 2 / 6) * (i + 0.5);
+        const vx = pixel.x + hexSize * Math.cos(angle);
+        const vy = pixel.y + hexSize * Math.sin(angle);
+        if (i === 0) drawingContext.moveTo(vx, vy);
+        else drawingContext.lineTo(vx, vy);
+      }
+      drawingContext.closePath();
+      drawingContext.clip();
+
+      // Draw diagonal red hatch lines across the hex
+      drawingContext.strokeStyle = 'rgba(255, 0, 0, 0.55)';
+      drawingContext.lineWidth = 1.5;
+      const step = hexSize * 0.35;
+      for (let d = -hexSize * 2; d <= hexSize * 2; d += step) {
+        drawingContext.beginPath();
+        drawingContext.moveTo(pixel.x + d - hexSize, pixel.y - hexSize);
+        drawingContext.lineTo(pixel.x + d + hexSize, pixel.y + hexSize);
+        drawingContext.stroke();
+      }
+
+      drawingContext.restore();
     }
     
     // Draw red dot on last placed piece
