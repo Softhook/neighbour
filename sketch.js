@@ -432,6 +432,11 @@ function drawUI() {
   noStroke();
   text(game.statusMessage, width / 2, height - 40);
   
+  if (game.aiThinking) {
+    const spinnerX = width / 2 + messageWidth / 2 + 24;
+    drawThinkingSpinner(spinnerX, height - 40, 9);
+  }
+  
   const undoButton = getUndoButton();
   const canUndo = game.moveHistory.length > 0;
   fill(canUndo ? color(0, 0, 80) : color(0, 0, 65));
@@ -443,6 +448,14 @@ function drawUI() {
   textSize(14);
   text("Undo (U)", undoButton.x + undoButton.w / 2, undoButton.y + undoButton.h / 2);
   
+}
+
+function drawThinkingSpinner(x, y, radius) {
+  const angle = (millis() / 1000) * 6;
+  stroke(0, 0, 0);
+  strokeWeight(2.5);
+  noFill();
+  arc(x, y, radius * 2, radius * 2, angle, angle + Math.PI * 1.35);
 }
 
 function drawGameOverScreen() {
@@ -1381,13 +1394,13 @@ function getAIMaxMoveTime(difficulty) {
     case AI_DIFFICULTY_EASY: return "~1s";
     case AI_DIFFICULTY_MEDIUM: return "~1s";
     case AI_DIFFICULTY_HARD: return "~1s";
-    case AI_DIFFICULTY_EXPERT: return "~3s";
-    case AI_DIFFICULTY_MASTER: return "~4s";
-    case AI_DIFFICULTY_GRANDMASTER: return "~6s";
-    case AI_DIFFICULTY_ULTIMATE: return "~10s";
-    case AI_DIFFICULTY_SUPERHUMAN: return "~15s";
-    case AI_DIFFICULTY_GODLIKE: return "~20s";
-    case AI_DIFFICULTY_OMNISCIENT: return "~30s";
+    case AI_DIFFICULTY_EXPERT: return "~2s";
+    case AI_DIFFICULTY_MASTER: return "~3s";
+    case AI_DIFFICULTY_GRANDMASTER: return "~4s";
+    case AI_DIFFICULTY_ULTIMATE: return "~5s";
+    case AI_DIFFICULTY_SUPERHUMAN: return "~6s";
+    case AI_DIFFICULTY_GODLIKE: return "~7s";
+    case AI_DIFFICULTY_OMNISCIENT: return "~8s";
     default: return "~1s";
   }
 }
@@ -1475,32 +1488,32 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
   
   switch(game.aiDifficulty) {
     case AI_DIFFICULTY_EXPERT:
-      depth = 5; // Increased from 4
-      maxThinkingTime = 3000;
+      depth = 4;
+      maxThinkingTime = 1500;
       break;
     case AI_DIFFICULTY_MASTER:
-      depth = 6; // Increased from 5
-      maxThinkingTime = 4000;
+      depth = 5;
+      maxThinkingTime = 2200;
       break;
     case AI_DIFFICULTY_GRANDMASTER:
-      depth = 7; // Increased from 6
-      maxThinkingTime = 6000;
+      depth = 6;
+      maxThinkingTime = 3000;
       break;
     case AI_DIFFICULTY_ULTIMATE:
-      depth = 8; // Increased from 7
-      maxThinkingTime = 10000;
+      depth = 7;
+      maxThinkingTime = 4200;
       break;
     case AI_DIFFICULTY_SUPERHUMAN:
-      depth = 9; // Deep search with extended time
-      maxThinkingTime = 15000;
+      depth = 8;
+      maxThinkingTime = 5200;
       break;
     case AI_DIFFICULTY_GODLIKE:
-      depth = 10; // Very deep search
-      maxThinkingTime = 20000;
+      depth = 8;
+      maxThinkingTime = 6500;
       break;
     case AI_DIFFICULTY_OMNISCIENT:
-      depth = 11; // Maximum practical depth
-      maxThinkingTime = 30000;
+      depth = 9;
+      maxThinkingTime = 8000;
       break;
     default:
       depth = 5;

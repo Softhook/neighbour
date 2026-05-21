@@ -391,3 +391,19 @@ test('undo via keyboard works even when gameOver is true', () => {
   expect(result.history).toBe(0);
   expect(result.gameOver).toBe(false);
 });
+
+test('higher AI difficulties keep max thinking times bounded', () => {
+  const sandbox = loadGameSandbox();
+
+  const result = vm.runInContext(`
+    ({
+      expert: getAIMaxMoveTime(AI_DIFFICULTY_EXPERT),
+      ultimate: getAIMaxMoveTime(AI_DIFFICULTY_ULTIMATE),
+      omniscient: getAIMaxMoveTime(AI_DIFFICULTY_OMNISCIENT)
+    });
+  `, sandbox);
+
+  expect(result.expert).toBe("~2s");
+  expect(result.ultimate).toBe("~5s");
+  expect(result.omniscient).toBe("~8s");
+});
