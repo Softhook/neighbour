@@ -520,14 +520,14 @@ function mousePressed() {
   }
   
   if (game.screen === SCREEN_GAME) {
-    if (game.gameOver) {
-      game.screen = SCREEN_MODE_SELECT;
-      return;
-    }
-    
     const undoButton = getUndoButton();
     if (isPointInRect(mouseX, mouseY, undoButton)) {
       undoMove();
+      return;
+    }
+    
+    if (game.gameOver) {
+      game.screen = SCREEN_MODE_SELECT;
       return;
     }
     
@@ -544,7 +544,7 @@ function mousePressed() {
 }
 
 function keyPressed() {
-  if (game.screen !== SCREEN_GAME || game.gameOver) return;
+  if (game.screen !== SCREEN_GAME) return;
   
   if (key === 'u' || key === 'U') {
     undoMove();
@@ -617,8 +617,16 @@ function undoMove() {
     game.aiMoveTimeoutId = null;
   }
   
-  const previousState = game.moveHistory.pop();
+  let previousState = game.moveHistory.pop();
   restoreGameSnapshot(previousState);
+  
+  if (game.gameMode !== MODE_TWO_PLAYER) {
+    while (isCurrentTurnAI() && game.moveHistory.length > 0) {
+      previousState = game.moveHistory.pop();
+      restoreGameSnapshot(previousState);
+    }
+  }
+  
   updateStatusMessage();
   return true;
 }

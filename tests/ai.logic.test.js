@@ -37,6 +37,7 @@ function loadGameSandbox() {
     CENTER: 0,
     HSB: 0,
     CLOSE: 0,
+    key: '',
     setTimeout: (fn) => fn(),
     clearTimeout: () => {}
   };
@@ -326,4 +327,67 @@ test('undoMove restores captured creatures and score', () => {
   expect(result.restoredWhiteAt01).toBe(2);
   expect(result.restoredBlackScore).toBe(0);
   expect(result.restoredCurrentPlayer).toBe(1);
+});
+
+test('undoMove in AI mode reverts back to the human turn in one action', () => {
+  const sandbox = loadGameSandbox();
+
+  vm.runInContext(`
+    initializeGame();
+    game.gameMode = MODE_VS_AI_HUMAN_BLACK; // human black, AI white
+    makeMove(0, 0); // human move
+    makeMove(1, 0); // AI move
+  `, sandbox);
+
+  const result = vm.runInContext(`
+    const beforeUndo = {
+      currentPlayer: game.currentPlayer,
+      humanCell: game.board.get('0,0').player,
+      aiCell: game.board.get('1,0').player,
+      history: game.moveHistory.length
+    };
+    undoMove();
+    ({
+      beforeUndo,
+      afterCurrentPlayer: game.currentPlayer,
+      afterHumanCell: game.board.get('0,0').player,
+      afterAiCell: game.board.get('1,0').player,
+      afterHistory: game.moveHistory.length
+    });
+  `, sandbox);
+
+  expect(result.beforeUndo.currentPlayer).toBe(1);
+  expect(result.beforeUndo.humanCell).toBe(1);
+  expect(result.beforeUndo.aiCell).toBe(2);
+  expect(result.beforeUndo.history).toBe(2);
+  expect(result.afterCurrentPlayer).toBe(1);
+  expect(result.afterHumanCell).toBe(0);
+  expect(result.afterAiCell).toBe(0);
+  expect(result.afterHistory).toBe(0);
+});
+
+test('undo via keyboard works even when gameOver is true', () => {
+  const sandbox = loadGameSandbox();
+
+  vm.runInContext(`
+    initializeGame();
+    makeMove(0, 0);
+    game.gameOver = true;
+    key = 'u';
+    keyPressed();
+  `, sandbox);
+
+  const result = vm.runInContext(`
+    ({
+      cell: game.board.get('0,0').player,
+      currentPlayer: game.currentPlayer,
+      history: game.moveHistory.length,
+      gameOver: game.gameOver
+    });
+  `, sandbox);
+
+  expect(result.cell).toBe(0);
+  expect(result.currentPlayer).toBe(1);
+  expect(result.history).toBe(0);
+  expect(result.gameOver).toBe(false);
 });
