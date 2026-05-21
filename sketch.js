@@ -844,6 +844,16 @@ function evaluateImmediateThreats(q, r, player, boardState = game, simulatedBoar
         evaluatedOpportunities.add(creatureSignature);
         threatScore += 15; // Opportunity to eat
       }
+      // Swarming opportunity: we placed a size-1 adjacent to an enemy size-4
+      else if (creature.size === 1 && neighborCreature.size === MAX_CREATURE_SIZE && !evaluatedOpportunities.has(creatureSignature)) {
+        evaluatedOpportunities.add(creatureSignature);
+        // Count our size-1s already adjacent to this enemy size-4 (tempBoard includes the placed piece)
+        const adjacentSwarmers = countSwarmingCreaturesForBoard(tempBoard, neighborCreature, player);
+        if (adjacentSwarmers >= 2) {
+          // 2+ of our size-1s are adjacent - one more placement will complete the swarm
+          threatScore += 20;
+        }
+      }
     }
   }
 
@@ -934,12 +944,12 @@ function countAdjacentFriendlyPieces(boardState, q, r, player) {
   return count;
 }
 
-function countSwarmingCreaturesForBoard(boardState, targetCreature, friendlyPlayer, excludeQ, excludeR) {
+function countSwarmingCreaturesForBoard(boardState, targetCreature, friendlyPlayer, excludeQ = null, excludeR = null) {
   const swarmers = new Set();
   
   for (const piece of targetCreature.pieces) {
     for (const neighbor of getNeighbors(piece.q, piece.r)) {
-      if (neighbor.q === excludeQ && neighbor.r === excludeR) continue;
+      if (excludeQ !== null && neighbor.q === excludeQ && neighbor.r === excludeR) continue;
       
       if (boardState.board.has(neighbor.key) && boardState.board.get(neighbor.key).player === friendlyPlayer) {
         const creature = getCreatureAtForBoardCached(boardState, neighbor.q, neighbor.r);
@@ -1754,7 +1764,12 @@ function evaluateBoardPositionOriginal(boardState, player) {
         case 1: positionScore += 5; break;
         case 2: positionScore += 20; break;
         case 3: positionScore += 35; break;
-        case 4: positionScore += 25; break; // Less valuable due to swarm risk
+        case 4: {
+          // Reduce value when actively threatened by swarming
+          const swarmThreat4 = countSwarmThreat(boardState, creature, opponent);
+          positionScore += Math.max(0, 25 - swarmThreat4 * 30);
+          break;
+        }
       }
       
       // Central position bonus
