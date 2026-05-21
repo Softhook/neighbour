@@ -451,11 +451,13 @@ function drawUI() {
 }
 
 function drawThinkingSpinner(x, y, radius) {
+  push();
   const angle = (millis() / 1000) * 6;
   stroke(0, 0, 0);
   strokeWeight(2.5);
   noFill();
   arc(x, y, radius * 2, radius * 2, angle, angle + Math.PI * 1.35);
+  pop();
 }
 
 function drawGameOverScreen() {
@@ -1364,13 +1366,11 @@ function updateStatusMessage() {
   
   // Check if AI is thinking
   if (game.aiThinking) {
-    const aiPlayerName = (game.gameMode === MODE_VS_AI_HUMAN_BLACK) ? "White" : "Black";
-    const difficultyName = getDifficultyName(game.aiDifficulty);
-    game.statusMessage = `AI (${difficultyName}) is thinking...`;
+    game.statusMessage = "AI is thinking...";
     return;
   }
   
-  game.statusMessage = `Player ${getPlayerName(game.currentPlayer)}'s turn. Pieces: ${game.piecesInHand[game.currentPlayer]}`;
+  game.statusMessage = `${getPlayerName(game.currentPlayer)} player's move. Pieces: ${game.piecesInHand[game.currentPlayer]}`;
 }
 
 function getDifficultyName(difficulty) {
@@ -1390,18 +1390,30 @@ function getDifficultyName(difficulty) {
 }
 
 function getAIMaxMoveTime(difficulty) {
+  return getAIDifficultyConfig(difficulty).maxMoveLabel;
+}
+
+function getAIDifficultyConfig(difficulty) {
   switch(difficulty) {
-    case AI_DIFFICULTY_EASY: return "~1s";
-    case AI_DIFFICULTY_MEDIUM: return "~1s";
-    case AI_DIFFICULTY_HARD: return "~1s";
-    case AI_DIFFICULTY_EXPERT: return "~2s";
-    case AI_DIFFICULTY_MASTER: return "~3s";
-    case AI_DIFFICULTY_GRANDMASTER: return "~4s";
-    case AI_DIFFICULTY_ULTIMATE: return "~5s";
-    case AI_DIFFICULTY_SUPERHUMAN: return "~6s";
-    case AI_DIFFICULTY_GODLIKE: return "~7s";
-    case AI_DIFFICULTY_OMNISCIENT: return "~8s";
-    default: return "~1s";
+    case AI_DIFFICULTY_EXPERT:
+      return { depth: 4, maxThinkingTime: 1500, maxMoveLabel: "~2s" };
+    case AI_DIFFICULTY_MASTER:
+      return { depth: 5, maxThinkingTime: 2200, maxMoveLabel: "~3s" };
+    case AI_DIFFICULTY_GRANDMASTER:
+      return { depth: 6, maxThinkingTime: 3000, maxMoveLabel: "~4s" };
+    case AI_DIFFICULTY_ULTIMATE:
+      return { depth: 7, maxThinkingTime: 4200, maxMoveLabel: "~5s" };
+    case AI_DIFFICULTY_SUPERHUMAN:
+      return { depth: 8, maxThinkingTime: 5200, maxMoveLabel: "~6s" };
+    case AI_DIFFICULTY_GODLIKE:
+      return { depth: 8, maxThinkingTime: 6500, maxMoveLabel: "~7s" };
+    case AI_DIFFICULTY_OMNISCIENT:
+      return { depth: 9, maxThinkingTime: 8000, maxMoveLabel: "~8s" };
+    case AI_DIFFICULTY_EASY:
+    case AI_DIFFICULTY_MEDIUM:
+    case AI_DIFFICULTY_HARD:
+    default:
+      return { depth: 5, maxThinkingTime: 3000, maxMoveLabel: "~1s" };
   }
 }
 
@@ -1484,41 +1496,7 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
   const moveStartTime = Date.now();
   
   // Deeper search and longer thinking time for higher difficulties
-  let depth, maxThinkingTime;
-  
-  switch(game.aiDifficulty) {
-    case AI_DIFFICULTY_EXPERT:
-      depth = 4;
-      maxThinkingTime = 1500;
-      break;
-    case AI_DIFFICULTY_MASTER:
-      depth = 5;
-      maxThinkingTime = 2200;
-      break;
-    case AI_DIFFICULTY_GRANDMASTER:
-      depth = 6;
-      maxThinkingTime = 3000;
-      break;
-    case AI_DIFFICULTY_ULTIMATE:
-      depth = 7;
-      maxThinkingTime = 4200;
-      break;
-    case AI_DIFFICULTY_SUPERHUMAN:
-      depth = 8;
-      maxThinkingTime = 5200;
-      break;
-    case AI_DIFFICULTY_GODLIKE:
-      depth = 8;
-      maxThinkingTime = 6500;
-      break;
-    case AI_DIFFICULTY_OMNISCIENT:
-      depth = 9;
-      maxThinkingTime = 8000;
-      break;
-    default:
-      depth = 5;
-      maxThinkingTime = 3000;
-  }
+  const { depth, maxThinkingTime } = getAIDifficultyConfig(game.aiDifficulty);
   
   const startTime = Date.now();
   
@@ -1531,19 +1509,31 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
   };
   
   // Enhanced move ordering with pre-computed board states
-  const moveData = validMoves.map(move => {
+  const moveData = [];
+  const precomputeTimeLimit = maxThinkingTime * 0.6;
+  for (const move of validMoves) {
+    if (Date.now() - startTime > precomputeTimeLimit) {
+      break;
+    }
+
     const tempBoard = simulateMove(move.q, move.r, aiPlayer);
     const moveScore = evaluateSimulatedMoveFast(currentBoardState, tempBoard, move.q, move.r, aiPlayer);
     const captureScore = (tempBoard.scores[aiPlayer] - game.scores[aiPlayer]) * 1000;
     const threatScore = evaluateImmediateThreats(move.q, move.r, aiPlayer, currentBoardState, tempBoard) * 100;
     const historyScore = getMoveScore(move, aiPlayer, 0);
     
-    return {
+    moveData.push({
       move,
       tempBoard, // Store pre-computed board for reuse
       score: captureScore + threatScore + moveScore + historyScore
-    };
-  }).sort((a, b) => b.score - a.score);
+    });
+  }
+
+  if (moveData.length === 0) {
+    return validMoves[0];
+  }
+
+  moveData.sort((a, b) => b.score - a.score);
   
   // Iterative deepening for better move ordering and time management
   let currentDepth = 1;

@@ -392,7 +392,7 @@ test('undo via keyboard works even when gameOver is true', () => {
   expect(result.gameOver).toBe(false);
 });
 
-test('higher AI difficulties keep max thinking times bounded', () => {
+test('higher AI difficulties expose updated max thinking labels', () => {
   const sandbox = loadGameSandbox();
 
   const result = vm.runInContext(`
