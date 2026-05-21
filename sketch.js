@@ -736,6 +736,8 @@ function simulateMoveOnBoard(boardState, q, r, player) {
 function evaluateMove(q, r, player) {
   const tempBoard = simulateMove(q, r, player);
   let score = (tempBoard.scores[player] - game.scores[player]) * 100;
+  const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  const placedCreature = getCreatureAtForBoardCached(tempBoard, q, r);
   
   if (game.aiDifficulty === AI_DIFFICULTY_EASY) {
     score += (Math.random() - 0.5) * 50;
@@ -743,13 +745,16 @@ function evaluateMove(q, r, player) {
   }
   
   if (game.aiDifficulty === AI_DIFFICULTY_MEDIUM) {
-    const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
     score += tempBoard.scores[player] * 8;
     score -= tempBoard.scores[opponent] * 6;
     
-    const placedCreature = getCreatureAtForBoardCached(tempBoard, q, r);
     if (placedCreature.size === 2) score += 15;
     else if (placedCreature.size === 3) score += 25;
+    else if (placedCreature.size === 4) {
+      score += 20;
+      const swarmThreat = countSwarmThreat(tempBoard, placedCreature, opponent);
+      score -= swarmThreat * 40;
+    }
     
     score += (Math.random() - 0.5) * 25;
     return score;
@@ -790,6 +795,7 @@ function evaluateMoveFast(boardState, q, r, player) {
     case 4: 
       const threats = countAdjacentOpponentPieces(tempBoard, q, r, opponent);
       score += Math.max(5, 25 - threats * 8);
+      score -= countSwarmThreat(tempBoard, creature, opponent) * 40;
       break;
   }
   
@@ -819,7 +825,7 @@ function evaluateImmediateThreats(q, r, player, boardState = game) {
       const neighborCreature = getCreatureAtForBoardCached(tempBoard, nq, nr);
       // Check if neighbor can eat our creature (neighbor size = our size + 1)
       if (neighborCreature.size === creature.size + 1) {
-        threatScore += 25; // High threat - can be eaten
+        threatScore -= 25; // High threat - can be eaten
       }
       // Check if we can eat neighbor (our size = neighbor size + 1)  
       else if (creature.size === neighborCreature.size + 1) {
@@ -995,7 +1001,7 @@ function countSwarmThreat(boardState, creature, opponent) {
     }
   }
   
-  return Math.max(0, swarmers - 2); // Need 3 to swarm, so threat starts at 3
+  return Math.max(0, swarmers - 1); // Opponent places one additional size-1 to complete the swarm
 }
 
 // AI Optimization Functions
@@ -1797,7 +1803,9 @@ function evaluateCreaturePlacement(boardState, creature, q, r) {
     case 3: placementScore += 45; break;
     case 4:
       const surroundingEnemies = countSurroundingEnemies(boardState, creature);
-      placementScore += 35 - (surroundingEnemies * 10);
+      const opponent = creature.player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+      const swarmThreat = countSwarmThreat(boardState, creature, opponent);
+      placementScore += 35 - (surroundingEnemies * 10) - (swarmThreat * 40);
       break;
   }
   
