@@ -662,7 +662,11 @@ function countSwarmingCreatures(targetCreature, friendlyPlayer, excludeQ, exclud
 }
 
 function getCreatureSignature(creature) {
-  return `${creature.pieces[0].q},${creature.pieces[0].r}_${creature.player}`;
+  const sortedCoords = creature.pieces
+    .map(piece => `${piece.q},${piece.r}`)
+    .sort()
+    .join('|');
+  return `${sortedCoords}_${creature.player}`;
 }
 
 // Core AI Support Functions (from try.js optimization)
@@ -819,6 +823,8 @@ function evaluateImmediateThreats(q, r, player, boardState = game, simulatedBoar
   const tempBoard = simulatedBoardState || simulateMoveOnBoard(boardState, q, r, player);
   const creature = getCreatureAtForBoardCached(tempBoard, q, r);
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
+  const evaluatedThreats = new Set();
+  const evaluatedOpportunities = new Set();
 
   for (const dir of HEX_DIRECTIONS) {
     const nq = q + dir.q;
@@ -827,12 +833,15 @@ function evaluateImmediateThreats(q, r, player, boardState = game, simulatedBoar
     
     if (tempBoard.board.has(nKey) && tempBoard.board.get(nKey).player === opponent) {
       const neighborCreature = getCreatureAtForBoardCached(tempBoard, nq, nr);
+      const creatureSignature = getCreatureSignature(neighborCreature);
       // Check if neighbor can eat our creature (neighbor size = our size + 1)
-      if (neighborCreature.size === creature.size + 1) {
+      if (neighborCreature.size === creature.size + 1 && !evaluatedThreats.has(creatureSignature)) {
+        evaluatedThreats.add(creatureSignature);
         threatScore -= 25; // High threat - can be eaten
       }
       // Check if we can eat neighbor (our size = neighbor size + 1)  
-      else if (creature.size === neighborCreature.size + 1) {
+      else if (creature.size === neighborCreature.size + 1 && !evaluatedOpportunities.has(creatureSignature)) {
+        evaluatedOpportunities.add(creatureSignature);
         threatScore += 15; // Opportunity to eat
       }
     }
@@ -890,11 +899,15 @@ function processEatingAndSwarmingForBoard(boardState, placedQ, placedR, currentP
 
 function getCreatureFromSignatureForBoard(boardState, signature) {
   const [coords, playerStr] = signature.split('_');
-  const [q, r] = coords.split(',').map(Number);
+  const [firstCoord] = coords.split('|');
+  const [q, r] = firstCoord.split(',').map(Number);
   const player = parseInt(playerStr);
   
   if (boardState.board.has(`${q},${r}`) && boardState.board.get(`${q},${r}`).player === player) {
-    return getCreatureAtForBoardCached(boardState, q, r);
+    const creature = getCreatureAtForBoardCached(boardState, q, r);
+    if (creature && getCreatureSignature(creature) === signature) {
+      return creature;
+    }
   }
   return null;
 }
@@ -1393,6 +1406,8 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
 // Enhanced minimax with transposition table and move ordering
 function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer, humanPlayer, startTime, maxThinkingTime) {
   performanceStats.nodesEvaluated++;
+  const originalAlpha = alpha;
+  const originalBeta = beta;
   // Check time limit
   if (Date.now() - startTime > maxThinkingTime) {
     return isMaximizing ? -1000 : 1000;
@@ -1498,9 +1513,9 @@ function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer
   }
   
   // Determine the correct transposition table flag
-  if (bestScore <= alpha) {
+  if (bestScore <= originalAlpha) {
     flag = TT_UPPERBOUND; // Fail-low
-  } else if (bestScore >= beta) {
+  } else if (bestScore >= originalBeta) {
     flag = TT_LOWERBOUND; // Fail-high  
   } else {
     flag = TT_EXACT; // Exact score within window
