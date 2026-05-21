@@ -771,8 +771,7 @@ function evaluateMove(q, r, player) {
   return evaluateHardAI(tempBoard, q, r, player, score);
 }
 
-function evaluateMoveFast(boardState, q, r, player) {
-  const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+function evaluateSimulatedMoveFast(boardState, tempBoard, q, r, player) {
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
   
   let score = 0;
@@ -802,7 +801,7 @@ function evaluateMoveFast(boardState, q, r, player) {
   const distanceFromCenter = Math.abs(q) + Math.abs(r) + Math.abs(-q - r);
   score += (6 - distanceFromCenter) * 3;
   
-  score += evaluateImmediateThreats(q, r, player, tempBoard) * 10;
+  score += evaluateImmediateThreats(q, r, player, boardState, tempBoard) * 10;
   
   const connections = countAdjacentFriendlyPieces(tempBoard, q, r, player);
   score += connections * 8;
@@ -810,9 +809,14 @@ function evaluateMoveFast(boardState, q, r, player) {
   return score;
 }
 
-function evaluateImmediateThreats(q, r, player, boardState = game) {
-  let threatScore = 0;
+function evaluateMoveFast(boardState, q, r, player) {
   const tempBoard = simulateMoveOnBoard(boardState, q, r, player);
+  return evaluateSimulatedMoveFast(boardState, tempBoard, q, r, player);
+}
+
+function evaluateImmediateThreats(q, r, player, boardState = game, simulatedBoardState = null) {
+  let threatScore = 0;
+  const tempBoard = simulatedBoardState || simulateMoveOnBoard(boardState, q, r, player);
   const creature = getCreatureAtForBoardCached(tempBoard, q, r);
   const opponent = player === PLAYER_BLACK ? PLAYER_WHITE : PLAYER_BLACK;
 
@@ -987,21 +991,25 @@ function countPotentialEating(boardState, q, r, player) {
 }
 
 function countSwarmThreat(boardState, creature, opponent) {
-  let swarmers = 0;
+  const swarmers = new Set();
+  const checkedNeighbors = new Set();
   
   for (const piece of creature.pieces) {
     for (const neighbor of getNeighbors(piece.q, piece.r)) {
+      if (checkedNeighbors.has(neighbor.key)) continue;
+      checkedNeighbors.add(neighbor.key);
+
       if (boardState.board.has(neighbor.key) && 
           boardState.board.get(neighbor.key).player === opponent) {
         const enemyCreature = getCreatureAtForBoardCached(boardState, neighbor.q, neighbor.r);
         if (enemyCreature.size === 1) {
-          swarmers++;
+          swarmers.add(neighbor.key);
         }
       }
     }
   }
   
-  return Math.max(0, swarmers - 1); // Opponent places one additional size-1 to complete the swarm
+  return Math.max(0, swarmers.size - 1); // Opponent places one additional size-1 to complete the swarm
 }
 
 // AI Optimization Functions
@@ -1319,13 +1327,18 @@ function getMinimaxMoveOptimized(aiPlayer, humanPlayer, validMoves) {
   
   let bestMove = null;
   let bestScore = -Infinity;
+  const currentBoardState = {
+    board: game.board,
+    scores: game.scores,
+    piecesInHand: game.piecesInHand
+  };
   
   // Enhanced move ordering with pre-computed board states
   const moveData = validMoves.map(move => {
     const tempBoard = simulateMove(move.q, move.r, aiPlayer);
-    const moveScore = evaluateMoveFast(tempBoard, move.q, move.r, aiPlayer);
+    const moveScore = evaluateSimulatedMoveFast(currentBoardState, tempBoard, move.q, move.r, aiPlayer);
     const captureScore = (tempBoard.scores[aiPlayer] - game.scores[aiPlayer]) * 1000;
-    const threatScore = evaluateImmediateThreats(move.q, move.r, aiPlayer) * 100;
+    const threatScore = evaluateImmediateThreats(move.q, move.r, aiPlayer, currentBoardState, tempBoard) * 100;
     const historyScore = getMoveScore(move, aiPlayer, 0);
     
     return {
@@ -1437,7 +1450,7 @@ function minimaxOptimized(boardState, depth, alpha, beta, isMaximizing, aiPlayer
   const moveData = moves.map(move => {
     const tmpBoard = simulateMoveOnBoard(boardState, move.q, move.r, currentPlayer);
     // Combine fast evaluation and history heuristic
-    const score = evaluateMoveFast(boardState, move.q, move.r, currentPlayer) + getMoveScore(move, currentPlayer, depth);
+    const score = evaluateSimulatedMoveFast(boardState, tmpBoard, move.q, move.r, currentPlayer) + getMoveScore(move, currentPlayer, depth);
     return { move, tmpBoard, score };
   });
   moveData.sort((a, b) => isMaximizing ? b.score - a.score : a.score - b.score);
