@@ -399,11 +399,13 @@ test('higher AI difficulties expose updated max thinking labels', () => {
     ({
       expert: getAIMaxMoveTime(AI_DIFFICULTY_EXPERT),
       ultimate: getAIMaxMoveTime(AI_DIFFICULTY_ULTIMATE),
-      omniscient: getAIMaxMoveTime(AI_DIFFICULTY_OMNISCIENT)
+      omniscient: getAIMaxMoveTime(AI_DIFFICULTY_OMNISCIENT),
+      omniscientConfig: getAIDifficultyConfig(AI_DIFFICULTY_OMNISCIENT)
     });
   `, sandbox);
 
   expect(result.expert).toBe("~2s");
   expect(result.ultimate).toBe("~5s");
-  expect(result.omniscient).toBe("~8s");
+  expect(result.omniscient).toBe("~10s");
+  expect(result.omniscientConfig.maxThinkingTime).toBe(10000);
 });
