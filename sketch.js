@@ -477,6 +477,7 @@ function ensureAISpinnerElement() {
     aiSpinnerElement.setAttribute('aria-hidden', 'true');
     aiSpinnerElement.style.position = 'fixed';
     aiSpinnerElement.style.pointerEvents = 'none';
+    aiSpinnerElement.style.boxSizing = 'border-box';
     aiSpinnerElement.style.borderStyle = 'solid';
     aiSpinnerElement.style.borderColor = 'rgb(20, 20, 20) transparent rgb(20, 20, 20) rgb(20, 20, 20)';
     aiSpinnerElement.style.borderRadius = '50%';
@@ -490,13 +491,16 @@ function ensureAISpinnerElement() {
 }
 
 function updateAISpinnerOverlay(x, y, radius, visible) {
+  if (!visible) {
+    if (aiSpinnerElement) {
+      aiSpinnerElement.style.display = 'none';
+      return true;
+    }
+    return false;
+  }
+
   const spinner = ensureAISpinnerElement();
   if (!spinner) return false;
-
-  if (!visible) {
-    spinner.style.display = 'none';
-    return true;
-  }
 
   const size = radius * 2;
   spinner.style.display = 'block';

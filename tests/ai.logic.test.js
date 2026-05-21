@@ -481,3 +481,20 @@ test('AI spinner overlay is created and can be shown/hidden when document is ava
   expect(result.beforeHideTop).toBe("240px");
   expect(result.afterHideDisplay).toBe("none");
 });
+
+test('AI spinner overlay hide path does not create DOM nodes', () => {
+  const sandbox = loadGameSandbox({ withDocument: true });
+
+  const result = vm.runInContext(`
+    const hidden = updateAISpinnerOverlay(0, 0, 9, false);
+    ({
+      hidden,
+      hasSpinner: !!aiSpinnerElement,
+      hasStyleNode: !!document.getElementById('ai-thinking-spinner-style')
+    });
+  `, sandbox);
+
+  expect(result.hidden).toBe(false);
+  expect(result.hasSpinner).toBe(false);
+  expect(result.hasStyleNode).toBe(false);
+});
