@@ -76,6 +76,67 @@ test('swarm correctly triggers when 3 size-1 pieces are adjacent to enemy size-4
   expect(blackScore).toBe(4); // All 4 WHITE pieces captured by swarm
 });
 
+test('swarming via makeMove actually removes the size-4 creature from the board', () => {
+  const sandbox = loadGameSandbox();
+
+  vm.runInContext('initializeGame();', sandbox);
+  const BLACK = vm.runInContext('PLAYER_BLACK', sandbox);
+  const WHITE = vm.runInContext('PLAYER_WHITE', sandbox);
+
+  // WHITE size-4 creature at (0,0), (1,0), (0,1), (-1,1)
+  setPlayer(sandbox, 0, 0, WHITE);
+  setPlayer(sandbox, 1, 0, WHITE);
+  setPlayer(sandbox, 0, 1, WHITE);
+  setPlayer(sandbox, -1, 1, WHITE);
+
+  // 2 BLACK size-1 pieces already adjacent to the WHITE size-4
+  setPlayer(sandbox, -1, 0, BLACK); // adjacent to (0,0) and (-1,1)
+  setPlayer(sandbox, 1, -1, BLACK); // adjacent to (0,0) and (1,0)
+
+  // game.currentPlayer is BLACK after initializeGame(); place 3rd piece via makeMove
+  vm.runInContext('makeMove(0, 2);', sandbox);
+
+  const result = vm.runInContext(`
+    let whiteCount = 0;
+    for (const [key, cell] of game.board) {
+      if (cell.player === PLAYER_WHITE) whiteCount++;
+    }
+    ({ whiteCount, blackScore: game.scores[PLAYER_BLACK] });
+  `, sandbox);
+
+  expect(result.whiteCount).toBe(0); // All 4 WHITE pieces removed from board by swarm
+  expect(result.blackScore).toBe(4); // Score updated correctly
+});
+
+test('eating via makeMove removes multi-piece opponent creature from the board', () => {
+  const sandbox = loadGameSandbox();
+
+  vm.runInContext('initializeGame();', sandbox);
+  const BLACK = vm.runInContext('PLAYER_BLACK', sandbox);
+  const WHITE = vm.runInContext('PLAYER_WHITE', sandbox);
+
+  // WHITE size-2 creature at (1,0), (0,1)
+  setPlayer(sandbox, 1, 0, WHITE);
+  setPlayer(sandbox, 0, 1, WHITE);
+
+  // Place BLACK pieces to form a size-3 creature touching the WHITE size-2
+  setPlayer(sandbox, -1, 0, BLACK);
+  setPlayer(sandbox, 0, 0, BLACK);
+  // Placing BLACK at (1,-1) connects to (0,0) and (-1,0) making size-3; (1,-1) is adjacent to WHITE (1,0)
+  vm.runInContext('makeMove(1, -1);', sandbox);
+
+  const result = vm.runInContext(`
+    let whiteCount = 0;
+    for (const [key, cell] of game.board) {
+      if (cell.player === PLAYER_WHITE) whiteCount++;
+    }
+    ({ whiteCount, blackScore: game.scores[PLAYER_BLACK] });
+  `, sandbox);
+
+  expect(result.whiteCount).toBe(0); // Both WHITE pieces removed from board
+  expect(result.blackScore).toBe(2); // 2 pieces eaten
+});
+
 test('evaluateImmediateThreats gives bonus for size-1 placed near enemy size-4 with an ally', () => {
   const sandbox = loadGameSandbox();
 

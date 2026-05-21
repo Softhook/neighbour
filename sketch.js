@@ -1150,7 +1150,8 @@ function getMoveScore(move, player, depth) {
 
 function getCreatureFromSignature(signature) {
   const [coords, playerStr] = signature.split('_');
-  const [q, r] = coords.split(',').map(Number);
+  const [firstCoord] = coords.split('|');
+  const [q, r] = firstCoord.split(',').map(Number);
   const player = parseInt(playerStr);
   
   if (game.board.has(`${q},${r}`) && game.board.get(`${q},${r}`).player === player) {
