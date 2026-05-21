@@ -52,7 +52,10 @@ let game = {
   lastPlayerToMove: null,
   lastPlacedPiece: null,
   statusMessage: "",
-  aiThinking: false
+  aiThinking: false,
+  aiMoveTimeoutId: null,
+  moveHistory: [],
+  legalMoveKeys: null
 };
 
 // AI Optimization Infrastructure
@@ -116,6 +119,11 @@ function calculateHexSize() {
 }
 
 function initializeGame() {
+  if (game.aiMoveTimeoutId !== null) {
+    clearTimeout(game.aiMoveTimeoutId);
+    game.aiMoveTimeoutId = null;
+  }
+  
   // Reset game state
   game.board.clear();
   game.validHexes = [];
@@ -126,6 +134,8 @@ function initializeGame() {
   game.winner = null;
   game.lastPlayerToMove = null;
   game.lastPlacedPiece = null;
+  game.aiThinking = false;
+  game.moveHistory = [];
   game.screen = SCREEN_GAME;
   
   // Generate hexagonal board
@@ -161,8 +171,7 @@ function draw() {
     }
     
     // AI processing
-    if ((game.gameMode === MODE_VS_AI_HUMAN_BLACK && game.currentPlayer === PLAYER_WHITE) || 
-        (game.gameMode === MODE_VS_AI_HUMAN_WHITE && game.currentPlayer === PLAYER_BLACK)) {
+    if (isCurrentTurnAI()) {
       if (!game.gameOver && !game.aiThinking) {
         game.aiThinking = true;
         updateStatusMessage(); // Update status to show AI thinking
@@ -177,7 +186,8 @@ function draw() {
                             game.aiDifficulty === AI_DIFFICULTY_OMNISCIENT ? 3500 :
                             game.aiDifficulty === AI_DIFFICULTY_EXPERT ? 800 : baseDelay;
         
-        setTimeout(() => {
+        game.aiMoveTimeoutId = setTimeout(() => {
+          game.aiMoveTimeoutId = null;
           const aiMove = getAIMove();
           if (aiMove) {
             makeMove(aiMove.q, aiMove.r);
@@ -334,7 +344,8 @@ function drawDifficultyButton(button, label, isSelected) {
 function drawBoard() {
   for (const hex of game.validHexes) {
     const pixel = axialToPixel(hex.q, hex.r);
-    const cell = game.board.get(`${hex.q},${hex.r}`);
+    const hexKey = `${hex.q},${hex.r}`;
+    const cell = game.board.get(hexKey);
     
     const colors = {
       [PLAYER_BLACK]: color(0, 0, 15),
@@ -343,6 +354,12 @@ function drawBoard() {
     };
     
     drawHex(pixel.x, pixel.y, hexSize, colors[cell.player]);
+    
+    if (game.legalMoveKeys && cell.player === EMPTY && game.legalMoveKeys.has(hexKey)) {
+      noStroke();
+      fill(210, 10, 35, 30);
+      circle(pixel.x, pixel.y, hexSize * 0.25);
+    }
     
     // Draw red dot on last placed piece
     if (game.lastPlacedPiece && 
@@ -390,6 +407,17 @@ function drawUI() {
   fill(0);
   noStroke();
   text(game.statusMessage, width / 2, height - 40);
+  
+  const undoButton = getUndoButton();
+  const canUndo = game.moveHistory.length > 0;
+  fill(canUndo ? color(0, 0, 80) : color(0, 0, 65));
+  stroke(0, 0, 20);
+  strokeWeight(2);
+  rect(undoButton.x, undoButton.y, undoButton.w, undoButton.h, 6);
+  noStroke();
+  fill(canUndo ? color(0, 0, 15) : color(0, 0, 35));
+  textSize(14);
+  text("Undo (U)", undoButton.x + undoButton.w / 2, undoButton.y + undoButton.h / 2);
   
 }
 
@@ -487,14 +515,19 @@ function mousePressed() {
   }
   
   if (game.screen === SCREEN_GAME) {
+    const undoButton = getUndoButton();
+    if (isPointInRect(mouseX, mouseY, undoButton)) {
+      undoMove();
+      return;
+    }
+    
     if (game.gameOver) {
       game.screen = SCREEN_MODE_SELECT;
       return;
     }
     
     // Only allow human moves when it's not AI's turn
-    if ((game.gameMode === MODE_VS_AI_HUMAN_BLACK && game.currentPlayer === PLAYER_WHITE) ||
-        (game.gameMode === MODE_VS_AI_HUMAN_WHITE && game.currentPlayer === PLAYER_BLACK)) {
+    if (isCurrentTurnAI()) {
       return; // AI will make its move automatically
     }
     
@@ -503,6 +536,103 @@ function mousePressed() {
       makeMove(hexCoords.q, hexCoords.r);
     }
   }
+}
+
+function keyPressed() {
+  if (game.screen !== SCREEN_GAME) return;
+  
+  if (key === 'u' || key === 'U') {
+    undoMove();
+    return false;
+  }
+}
+
+function getUndoButton() {
+  return {
+    x: width - 140,
+    y: height - 58,
+    w: 120,
+    h: 34
+  };
+}
+
+function isPointInRect(x, y, rect) {
+  return x >= rect.x && x <= rect.x + rect.w &&
+         y >= rect.y && y <= rect.y + rect.h;
+}
+
+function isCurrentTurnAI() {
+  return (game.gameMode === MODE_VS_AI_HUMAN_BLACK && game.currentPlayer === PLAYER_WHITE) ||
+         (game.gameMode === MODE_VS_AI_HUMAN_WHITE && game.currentPlayer === PLAYER_BLACK);
+}
+
+function updateLegalMoveKeys() {
+  const showLegalMoves = game.screen === SCREEN_GAME && !game.gameOver && !game.aiThinking &&
+    game.piecesInHand[game.currentPlayer] > 0 && !isCurrentTurnAI();
+  game.legalMoveKeys = showLegalMoves
+    ? new Set(getValidMoves(game.currentPlayer).map(move => `${move.q},${move.r}`))
+    : null;
+}
+
+function createGameSnapshot() {
+  const boardSnapshot = new Map();
+  for (const [key, value] of game.board) {
+    boardSnapshot.set(key, { ...value });
+  }
+  
+  return {
+    board: boardSnapshot,
+    currentPlayer: game.currentPlayer,
+    scores: { ...game.scores },
+    piecesInHand: { ...game.piecesInHand },
+    gameOver: game.gameOver,
+    winner: game.winner,
+    lastPlayerToMove: game.lastPlayerToMove,
+    lastPlacedPiece: game.lastPlacedPiece ? { ...game.lastPlacedPiece } : null,
+    aiThinking: game.aiThinking
+  };
+}
+
+function restoreGameSnapshot(snapshot) {
+  game.board = new Map();
+  for (const [key, value] of snapshot.board) {
+    game.board.set(key, { ...value });
+  }
+  
+  game.currentPlayer = snapshot.currentPlayer;
+  game.scores = { ...snapshot.scores };
+  game.piecesInHand = { ...snapshot.piecesInHand };
+  game.gameOver = snapshot.gameOver;
+  game.winner = snapshot.winner;
+  game.lastPlayerToMove = snapshot.lastPlayerToMove;
+  game.lastPlacedPiece = snapshot.lastPlacedPiece ? { ...snapshot.lastPlacedPiece } : null;
+  game.aiThinking = snapshot.aiThinking;
+}
+
+function undoMove() {
+  if (game.moveHistory.length === 0) {
+    game.statusMessage = "No moves to undo.";
+    return false;
+  }
+  
+  if (game.aiMoveTimeoutId !== null) {
+    clearTimeout(game.aiMoveTimeoutId);
+    game.aiMoveTimeoutId = null;
+  }
+  
+  let previousState = game.moveHistory.pop();
+  restoreGameSnapshot(previousState);
+  
+  if (game.gameMode !== MODE_TWO_PLAYER) {
+    while (isCurrentTurnAI() && game.moveHistory.length > 0) {
+      previousState = game.moveHistory.pop();
+      restoreGameSnapshot(previousState);
+    }
+  }
+  
+  game.aiThinking = false;
+  updateStatusMessage();
+  return true;
 }
 
 function makeMove(q, r) {
@@ -526,6 +656,8 @@ function makeMove(q, r) {
     game.statusMessage = `Cannot create creature larger than ${MAX_CREATURE_SIZE}.`;
     return;
   }
+  
+  game.moveHistory.push(createGameSnapshot());
   
   // Execute move
   cell.player = game.currentPlayer;
@@ -1184,9 +1316,13 @@ function endGame() {
   } else {
     game.winner = game.lastPlayerToMove; // Tie goes to last player to move
   }
+  
+  updateLegalMoveKeys();
 }
 
 function updateStatusMessage() {
+  updateLegalMoveKeys();
+  
   if (game.gameOver) return;
   
   // Check if AI is thinking

@@ -37,7 +37,9 @@ function loadGameSandbox() {
     CENTER: 0,
     HSB: 0,
     CLOSE: 0,
-    setTimeout: (fn) => fn()
+    key: '',
+    setTimeout: (fn) => fn(),
+    clearTimeout: () => {}
   };
 
   vm.createContext(sandbox);
@@ -251,4 +253,141 @@ test('fast move evaluation penalizes immediately threatened placements', () => {
   `, sandbox);
 
   expect(riskyScore).toBeLessThan(safeScore);
+});
+
+test('undoMove restores board state after a normal move', () => {
+  const sandbox = loadGameSandbox();
+
+  vm.runInContext('initializeGame();', sandbox);
+
+  const result = vm.runInContext(`
+    makeMove(0, 0);
+    const moved = {
+      cell: game.board.get('0,0').player,
+      currentPlayer: game.currentPlayer,
+      pieces: game.piecesInHand[PLAYER_BLACK],
+      history: game.moveHistory.length
+    };
+    undoMove();
+    ({
+      moved,
+      restoredCell: game.board.get('0,0').player,
+      restoredPlayer: game.currentPlayer,
+      restoredPieces: game.piecesInHand[PLAYER_BLACK],
+      restoredHistory: game.moveHistory.length,
+      restoredLastPlaced: game.lastPlacedPiece
+    });
+  `, sandbox);
+
+  expect(result.moved.cell).toBe(1);
+  expect(result.moved.currentPlayer).toBe(2);
+  expect(result.moved.pieces).toBe(29);
+  expect(result.moved.history).toBe(1);
+  expect(result.restoredCell).toBe(0);
+  expect(result.restoredPlayer).toBe(1);
+  expect(result.restoredPieces).toBe(30);
+  expect(result.restoredHistory).toBe(0);
+  expect(result.restoredLastPlaced).toBeNull();
+});
+
+test('undoMove restores captured creatures and score', () => {
+  const sandbox = loadGameSandbox();
+
+  vm.runInContext('initializeGame();', sandbox);
+  const BLACK = vm.runInContext('PLAYER_BLACK', sandbox);
+  const WHITE = vm.runInContext('PLAYER_WHITE', sandbox);
+
+  setPlayer(sandbox, 1, 0, WHITE);
+  setPlayer(sandbox, 0, 1, WHITE);
+  setPlayer(sandbox, -1, 0, BLACK);
+  setPlayer(sandbox, 0, 0, BLACK);
+
+  const result = vm.runInContext(`
+    makeMove(1, -1); // captures WHITE size-2 creature
+    const afterCapture = {
+      whiteAt10: game.board.get('1,0').player,
+      whiteAt01: game.board.get('0,1').player,
+      blackScore: game.scores[PLAYER_BLACK]
+    };
+
+    undoMove();
+    ({
+      afterCapture,
+      restoredWhiteAt10: game.board.get('1,0').player,
+      restoredWhiteAt01: game.board.get('0,1').player,
+      restoredBlackScore: game.scores[PLAYER_BLACK],
+      restoredCurrentPlayer: game.currentPlayer
+    });
+  `, sandbox);
+
+  expect(result.afterCapture.whiteAt10).toBe(0);
+  expect(result.afterCapture.whiteAt01).toBe(0);
+  expect(result.afterCapture.blackScore).toBe(2);
+  expect(result.restoredWhiteAt10).toBe(2);
+  expect(result.restoredWhiteAt01).toBe(2);
+  expect(result.restoredBlackScore).toBe(0);
+  expect(result.restoredCurrentPlayer).toBe(1);
+});
+
+test('undoMove in AI mode reverts back to the human turn in one action', () => {
+  const sandbox = loadGameSandbox();
+
+  vm.runInContext(`
+    initializeGame();
+    game.gameMode = MODE_VS_AI_HUMAN_BLACK; // human black, AI white
+    makeMove(0, 0); // human move
+    makeMove(1, 0); // AI move
+  `, sandbox);
+
+  const result = vm.runInContext(`
+    const beforeUndo = {
+      currentPlayer: game.currentPlayer,
+      humanCell: game.board.get('0,0').player,
+      aiCell: game.board.get('1,0').player,
+      history: game.moveHistory.length
+    };
+    undoMove();
+    ({
+      beforeUndo,
+      afterCurrentPlayer: game.currentPlayer,
+      afterHumanCell: game.board.get('0,0').player,
+      afterAiCell: game.board.get('1,0').player,
+      afterHistory: game.moveHistory.length
+    });
+  `, sandbox);
+
+  expect(result.beforeUndo.currentPlayer).toBe(1);
+  expect(result.beforeUndo.humanCell).toBe(1);
+  expect(result.beforeUndo.aiCell).toBe(2);
+  expect(result.beforeUndo.history).toBe(2);
+  expect(result.afterCurrentPlayer).toBe(1);
+  expect(result.afterHumanCell).toBe(0);
+  expect(result.afterAiCell).toBe(0);
+  expect(result.afterHistory).toBe(0);
+});
+
+test('undo via keyboard works even when gameOver is true', () => {
+  const sandbox = loadGameSandbox();
+
+  vm.runInContext(`
+    initializeGame();
+    makeMove(0, 0);
+    game.gameOver = true;
+    key = 'u';
+    keyPressed();
+  `, sandbox);
+
+  const result = vm.runInContext(`
+    ({
+      cell: game.board.get('0,0').player,
+      currentPlayer: game.currentPlayer,
+      history: game.moveHistory.length,
+      gameOver: game.gameOver
+    });
+  `, sandbox);
+
+  expect(result.cell).toBe(0);
+  expect(result.currentPlayer).toBe(1);
+  expect(result.history).toBe(0);
+  expect(result.gameOver).toBe(false);
 });
