@@ -1,8 +1,9 @@
 const fs = require('fs');
+const path = require('path');
 const vm = require('vm');
 
 function loadGameSandbox() {
-  const code = fs.readFileSync('/home/runner/work/neighbour/neighbour/sketch.js', 'utf8');
+  const code = fs.readFileSync(path.resolve(__dirname, '..', 'sketch.js'), 'utf8');
   const sandbox = {
     console,
     Math,
