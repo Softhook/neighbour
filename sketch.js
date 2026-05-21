@@ -93,6 +93,7 @@ const TT_UPPERBOUND = 2;
 // Display settings
 let hexSize = 25;
 let boardCenter = { x: 0, y: 0 };
+let aiSpinnerElement = null;
 
 function setup() {
   createCanvas(windowWidth, windowHeight);
@@ -157,6 +158,9 @@ function initializeGame() {
 
 function draw() {
   background(60, 5, 95);
+  if (game.screen !== SCREEN_GAME || !game.aiThinking) {
+    updateAISpinnerOverlay(0, 0, 9, false);
+  }
   
   if (game.screen === SCREEN_INTRO) {
     drawIntroScreen();
@@ -434,7 +438,10 @@ function drawUI() {
   
   if (game.aiThinking) {
     const spinnerX = width / 2 + messageWidth / 2 + 24;
-    drawThinkingSpinner(spinnerX, height - 40, 9);
+    const hasOverlaySpinner = updateAISpinnerOverlay(spinnerX, height - 40, 9, true);
+    if (!hasOverlaySpinner) {
+      drawThinkingSpinner(spinnerX, height - 40, 9);
+    }
   }
   
   const undoButton = getUndoButton();
@@ -448,6 +455,61 @@ function drawUI() {
   textSize(14);
   text("Undo (U)", undoButton.x + undoButton.w / 2, undoButton.y + undoButton.h / 2);
   
+}
+
+function ensureAISpinnerElement() {
+  if (typeof document === 'undefined') return null;
+
+  if (!document.getElementById('ai-thinking-spinner-style')) {
+    const styleEl = document.createElement('style');
+    styleEl.id = 'ai-thinking-spinner-style';
+    styleEl.textContent = `
+      @keyframes aiThinkingSpin {
+        from { transform: translate(-50%, -50%) rotate(0deg); }
+        to { transform: translate(-50%, -50%) rotate(360deg); }
+      }
+    `;
+    document.head.appendChild(styleEl);
+  }
+
+  if (!aiSpinnerElement) {
+    aiSpinnerElement = document.createElement('div');
+    aiSpinnerElement.setAttribute('aria-hidden', 'true');
+    aiSpinnerElement.style.position = 'fixed';
+    aiSpinnerElement.style.pointerEvents = 'none';
+    aiSpinnerElement.style.boxSizing = 'border-box';
+    aiSpinnerElement.style.borderStyle = 'solid';
+    aiSpinnerElement.style.borderColor = 'rgb(20, 20, 20) transparent rgb(20, 20, 20) rgb(20, 20, 20)';
+    aiSpinnerElement.style.borderRadius = '50%';
+    aiSpinnerElement.style.animation = 'aiThinkingSpin 0.9s linear infinite';
+    aiSpinnerElement.style.zIndex = '999';
+    aiSpinnerElement.style.display = 'none';
+    document.body.appendChild(aiSpinnerElement);
+  }
+
+  return aiSpinnerElement;
+}
+
+function updateAISpinnerOverlay(x, y, radius, visible) {
+  if (!visible) {
+    if (aiSpinnerElement) {
+      aiSpinnerElement.style.display = 'none';
+      return true;
+    }
+    return false;
+  }
+
+  const spinner = ensureAISpinnerElement();
+  if (!spinner) return false;
+
+  const size = radius * 2;
+  spinner.style.display = 'block';
+  spinner.style.width = `${size}px`;
+  spinner.style.height = `${size}px`;
+  spinner.style.left = `${x}px`;
+  spinner.style.top = `${y}px`;
+  spinner.style.borderWidth = `${Math.max(2, radius * 0.25)}px`;
+  return true;
 }
 
 function drawThinkingSpinner(x, y, radius) {
@@ -1408,7 +1470,7 @@ function getAIDifficultyConfig(difficulty) {
     case AI_DIFFICULTY_GODLIKE:
       return { depth: 8, maxThinkingTime: 6500, maxMoveLabel: "~7s" };
     case AI_DIFFICULTY_OMNISCIENT:
-      return { depth: 9, maxThinkingTime: 8000, maxMoveLabel: "~8s" };
+      return { depth: 9, maxThinkingTime: 10000, maxMoveLabel: "~10s" };
     case AI_DIFFICULTY_EASY:
     case AI_DIFFICULTY_MEDIUM:
     case AI_DIFFICULTY_HARD:
