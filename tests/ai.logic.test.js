@@ -2,7 +2,41 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-function loadGameSandbox() {
+function createMockDocument() {
+  const nodesById = new Map();
+
+  const registerIfIdPresent = (node) => {
+    if (node && node.id) {
+      nodesById.set(node.id, node);
+    }
+  };
+
+  return {
+    head: {
+      appendChild(node) {
+        registerIfIdPresent(node);
+        return node;
+      }
+    },
+    body: {
+      appendChild(node) {
+        registerIfIdPresent(node);
+        return node;
+      }
+    },
+    createElement() {
+      return {
+        style: {},
+        setAttribute() {}
+      };
+    },
+    getElementById(id) {
+      return nodesById.get(id) || null;
+    }
+  };
+}
+
+function loadGameSandbox({ withDocument = false } = {}) {
   const code = fs.readFileSync(path.resolve(__dirname, '..', 'sketch.js'), 'utf8');
   const sandbox = {
     console,
@@ -41,6 +75,9 @@ function loadGameSandbox() {
     setTimeout: (fn) => fn(),
     clearTimeout: () => {}
   };
+  if (withDocument) {
+    sandbox.document = createMockDocument();
+  }
 
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox);
@@ -408,4 +445,39 @@ test('higher AI difficulties expose updated max thinking labels', () => {
   expect(result.ultimate).toBe("~5s");
   expect(result.omniscient).toBe("~10s");
   expect(result.omniscientConfig.maxThinkingTime).toBe(10000);
+});
+
+test('AI spinner overlay is created and can be shown/hidden when document is available', () => {
+  const sandbox = loadGameSandbox({ withDocument: true });
+
+  const result = vm.runInContext(`
+    const shown = updateAISpinnerOverlay(120, 240, 9, true);
+    const spinner = aiSpinnerElement;
+    const styleNode = document.getElementById('ai-thinking-spinner-style');
+    const beforeHideDisplay = spinner.style.display;
+    const beforeHideLeft = spinner.style.left;
+    const beforeHideTop = spinner.style.top;
+
+    const hidden = updateAISpinnerOverlay(0, 0, 9, false);
+
+    ({
+      shown,
+      hidden,
+      hasSpinner: !!spinner,
+      hasStyleNode: !!styleNode,
+      beforeHideDisplay,
+      beforeHideLeft,
+      beforeHideTop,
+      afterHideDisplay: spinner.style.display
+    });
+  `, sandbox);
+
+  expect(result.shown).toBe(true);
+  expect(result.hidden).toBe(true);
+  expect(result.hasSpinner).toBe(true);
+  expect(result.hasStyleNode).toBe(true);
+  expect(result.beforeHideDisplay).toBe("block");
+  expect(result.beforeHideLeft).toBe("120px");
+  expect(result.beforeHideTop).toBe("240px");
+  expect(result.afterHideDisplay).toBe("none");
 });
